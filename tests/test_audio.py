@@ -1,9 +1,17 @@
-from agent_dock_bell.audio import get_sound_cmd, resolve_sound_file
+from unittest.mock import patch
+from agent_dock_bell.audio import PRESET_SOUNDS, get_sound_cmd, resolve_sound_file
 
-def test_resolve_sound_file_presets():
-    bell = resolve_sound_file("bell")
-    assert bell != ""
-    assert "bell.oga" in bell
+def test_resolve_sound_file_fallback():
+    # Resolves to a valid audio file or fallback even in headless CI environments
+    sound = resolve_sound_file("bell")
+    assert sound != ""
+
+def test_resolve_sound_file_mocked():
+    # With sound files present, resolves directly to chosen preset
+    with patch("os.path.exists", return_value=True):
+        assert resolve_sound_file("bell") == PRESET_SOUNDS["bell"]
+        assert resolve_sound_file("pop") == PRESET_SOUNDS["pop"]
+        assert resolve_sound_file("complete") == PRESET_SOUNDS["complete"]
 
 def test_get_sound_cmd_volume():
     cmd_default = get_sound_cmd("/path/to/sound.oga", "1.0")
