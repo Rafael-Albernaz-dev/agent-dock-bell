@@ -63,10 +63,41 @@ flowchart TD
 
 ### Engineering Highlights
 * **`< 50ms` Hook Return**: Exits immediately with `{}` to satisfy agent lifecycle timeouts and prevent `SIGKILL`.
-* **Zero External Python Dependencies**: Built entirely with Python standard library and `ctypes` bindings to `libX11.so.6`.
+* **Modular Software Design**: Clean separation between D-Bus, X11 ctypes bindings, audio streaming, daemon locking, and CLI logic.
+* **Zero External Dependencies**: Built entirely with the Python standard library and POSIX syscalls (`libX11.so.6`).
 * **Process Tree Resolution**: Traverses `/proc/<pid>/status` to resolve parent terminal emulator processes (such as `gnome-terminal-server`, Tilix, Ptyxis, Alacritty, Kitty) even across tabbed multi-process trees.
 * **Clutter Animation Actor Reset**: Toggles `dash-to-dock`'s `dance-urgent-applications` setting on cleanup to ensure GNOME Shell Clutter timelines do not linger after focus is restored.
 * **Resilient Audio Loop**: Wraps PipeWire (`pw-play`) and Canberra (`canberra-gtk-play`) playback with timeout watchers to prevent device sink hangs.
+
+---
+
+## Repository Structure
+
+```text
+agent-dock-bell/
+├── .github/workflows/ci.yml       # Automated GitHub Actions test suite
+├── pyproject.toml                 # Standard PEP 621 packaging & CLI entrypoints
+├── install.sh                     # Zero-dependency installer for ~/.local/bin
+├── src/agent_dock_bell/
+│   ├── __init__.py
+│   ├── cli.py                     # High-speed hook launcher (<50ms) & stdin parsing
+│   ├── daemon.py                  # Background daemon lifecycle & PID locking
+│   ├── x11.py                     # libX11 ctypes bindings, XUrgencyHint & window focus
+│   ├── dock.py                    # D-Bus Unity LauncherEntry, notifications & Clutter reset
+│   └── audio.py                   # Looped audio worker with PipeWire & Canberra fallbacks
+└── tests/
+    ├── test_cli.py                # Agent payload validation (Antigravity, Codex, Hermes)
+    ├── test_x11.py                # Hex/int window normalization & ancestry resolution
+    ├── test_audio.py              # Sound command generation & preset resolution
+    └── test_daemon.py             # PID lock lifecycle & cleanup tests
+```
+
+### Running Unit Tests
+
+```bash
+# Run tests with pytest:
+pytest -v
+```
 
 ---
 

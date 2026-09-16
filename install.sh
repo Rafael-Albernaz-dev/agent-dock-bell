@@ -3,22 +3,34 @@ set -euo pipefail
 
 TARGET_DIR="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SOURCE="${SCRIPT_DIR}/bin/agent-dock-bell"
 BIN_TARGET="${TARGET_DIR}/agent-dock-bell"
 
 echo "=== Installing agent-dock-bell ==="
 mkdir -p "${TARGET_DIR}"
 
-# 1. Install executable
-cp -f "${BIN_SOURCE}" "${BIN_TARGET}"
-chmod +x "${BIN_TARGET}"
-echo "✓ Installed executable to ${BIN_TARGET}"
+# 1. Install runner script pointing to repository src/
+cat << EOF > "${BIN_TARGET}"
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
 
-# 2. Maintain legacy alias symlink (for existing configs using agent-alarm.sh)
+src_dir = Path("${SCRIPT_DIR}/src")
+if src_dir.exists() and str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+
+from agent_dock_bell.cli import main
+
+if __name__ == "__main__":
+    main()
+EOF
+chmod +x "${BIN_TARGET}"
+echo "✓ Installed executable runner to ${BIN_TARGET}"
+
+# 2. Maintain compatibility symlink for existing configs (agent-alarm.sh)
 ln -sf "${BIN_TARGET}" "${TARGET_DIR}/agent-alarm.sh"
 echo "✓ Created compatibility symlink: ${TARGET_DIR}/agent-alarm.sh -> agent-dock-bell"
 
-# 3. Create codex helper script if needed
+# 3. Create codex helper script
 CODEX_WRAPPER="${TARGET_DIR}/codex-cli-alarm.sh"
 cat << 'EOF' > "${CODEX_WRAPPER}"
 #!/usr/bin/env bash

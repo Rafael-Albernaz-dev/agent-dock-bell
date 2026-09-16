@@ -44,10 +44,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg-info/
+dist/
+build/
 .venv/
 env/
 venv/
 ENV/
+.pytest_cache/
+uv.lock
 
 # ------------------------------------------------------------------------------
 # Logs & Process Artifacts
