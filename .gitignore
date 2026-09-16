@@ -1,0 +1,61 @@
+# ------------------------------------------------------------------------------
+# AI Agent Context & Instruction Files (Private/Local to each user)
+# ------------------------------------------------------------------------------
+AGENTS.md
+agents.md
+AGENT.md
+agent.md
+CLAUDE.md
+claude.md
+GEMINI.md
+gemini.md
+COPILOT.md
+copilot.md
+CHATGPT.md
+chatgpt.md
+*.agent.md
+*.prompt.md
+*.llm.md
+*.instructions.md
+
+# Agent Directories & State
+.agents/
+.gemini/
+.codex/
+.hermes/
+.claude/
+.cursor/
+.windsurf/
+prompts/
+scratch/
+brain/
+transcripts/
+*.transcript.jsonl
+
+# Explicitly ensure core repo markdown docs are tracked
+!README.md
+!CHANGELOG.md
+!CONTRIBUTING.md
+
+# ------------------------------------------------------------------------------
+# Python & Runtime Artifacts
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+ENV/
+
+# ------------------------------------------------------------------------------
+# Logs & Process Artifacts
+# ------------------------------------------------------------------------------
+*.log
+*.pid
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
