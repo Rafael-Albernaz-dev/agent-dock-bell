@@ -2,6 +2,7 @@
 
 [![Linux](https://img.shields.io/badge/OS-Linux-FCC624?logo=linux&logoColor=black)](#)
 [![Python 3](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)](#)
+[![CI](https://github.com/Rafael-Albernaz-dev/agent-dock-bell/actions/workflows/ci.yml/badge.svg)](https://github.com/Rafael-Albernaz-dev/agent-dock-bell/actions/workflows/ci.yml)
 [![X11 / D-Bus](https://img.shields.io/badge/IPC-X11%20%7C%20D--Bus-orange)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
