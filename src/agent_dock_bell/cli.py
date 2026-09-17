@@ -7,12 +7,24 @@ import os
 import select
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .audio import play_single_sound, resolve_sound_file
 from .daemon import PIDLock, run_daemon
 from .dock import send_notification
 from .x11 import find_terminal_windows, get_active_window_id, get_ancestor_pids, to_int
+
+def build_daemon_environment() -> Dict[str, str]:
+    """Ensure a detached daemon can import the package from this checkout."""
+    env = os.environ.copy()
+    source_root = str(Path(__file__).resolve().parents[1])
+    python_paths = [path for path in env.get("PYTHONPATH", "").split(os.pathsep) if path]
+
+    if source_root not in python_paths:
+        python_paths.insert(0, source_root)
+    env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    return env
 
 def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: List[str]) -> bool:
     """Inspect stdin payload to skip test runs, subagents, or intermediate tool calls."""
@@ -28,9 +40,9 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
         if payload.get("fullyIdle") is False:
             return True
 
-        # 2. Hermes Agent Hook:
+        # 2. Hermes and Codex lifecycle hooks:
         event_name = payload.get("hook_event_name")
-        if event_name and event_name != "on_session_end":
+        if event_name and event_name not in ("on_session_end", "Stop"):
             return True
         extra = payload.get("extra")
         if isinstance(extra, dict):
@@ -154,6 +166,7 @@ def main() -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
         close_fds=True,
+        env=build_daemon_environment(),
     )
 
     print("{}")

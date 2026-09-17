@@ -1,5 +1,19 @@
-import pytest
-from agent_dock_bell.cli import should_skip_event
+import subprocess
+import sys
+
+from agent_dock_bell.cli import build_daemon_environment, should_skip_event
+
+def test_daemon_environment_imports_package_from_another_directory():
+    result = subprocess.run(
+        [sys.executable, "-c", "import agent_dock_bell.cli"],
+        cwd="/tmp",
+        env=build_daemon_environment(),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 def test_should_skip_test_flags():
     assert should_skip_event("", None, ["--test"]) is True
@@ -44,3 +58,15 @@ def test_should_skip_codex_tool_use():
 
     payload_done = {"stop_reason": "end_turn"}
     assert should_skip_event("", payload_done, []) is False
+
+def test_should_process_codex_stop_hook_payload():
+    payload_stop = {
+        "session_id": "session-123",
+        "cwd": "/tmp/project",
+        "hook_event_name": "Stop",
+        "turn_id": "turn-123",
+        "stop_hook_active": False,
+        "last_assistant_message": "Task completed.",
+    }
+
+    assert should_skip_event("", payload_stop, []) is False
