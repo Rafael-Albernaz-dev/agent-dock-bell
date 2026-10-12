@@ -13,7 +13,25 @@ from typing import Any, Dict, List, Optional
 from .audio import play_single_sound, resolve_sound_file
 from .daemon import PIDLock, run_daemon
 from .dock import send_notification
-from .x11 import find_terminal_windows, get_active_window_id, get_ancestor_pids, to_int
+from .x11 import (
+    find_terminal_windows,
+    get_active_window_id,
+    get_ancestor_pids,
+    get_ancestor_ttys,
+    is_terminal_focused,
+    to_int,
+)
+
+def get_python_executable() -> str:
+    """Return a python executable that has access to system libraries (like gi)."""
+    try:
+        import gi  # noqa: F401
+        return sys.executable
+    except ImportError:
+        for candidate in ["/usr/bin/python3", "/usr/local/bin/python3"]:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return sys.executable
 
 def build_daemon_environment() -> Dict[str, str]:
     """Ensure a detached daemon can import the package from this checkout."""
@@ -44,10 +62,16 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
         event_name = payload.get("hook_event_name")
         if event_name and event_name not in ("on_session_end", "Stop"):
             return True
+        completed = payload.get("completed")
+        interrupted = payload.get("interrupted")
         extra = payload.get("extra")
         if isinstance(extra, dict):
-            if extra.get("completed") is False or extra.get("interrupted") is True:
-                return True
+            if "completed" in extra:
+                completed = extra.get("completed")
+            if "interrupted" in extra:
+                interrupted = extra.get("interrupted")
+        if completed is False or interrupted is True:
+            return True
 
         # 3. Codex CLI Stop Hook:
         stop_reason = payload.get("stop_reason")
@@ -68,14 +92,19 @@ def main() -> None:
         desktop_id = args[d_idx + 2] if len(args) > d_idx + 2 else "org.gnome.Terminal.desktop"
         wids_raw = args[d_idx + 3] if len(args) > d_idx + 3 else ""
         pids_raw = args[d_idx + 4] if len(args) > d_idx + 4 else ""
+        ttys_raw = args[d_idx + 5] if len(args) > d_idx + 5 else ""
 
         term_wids = {to_int(w) for w in wids_raw.split(",") if to_int(w) is not None}
         term_pids = {to_int(p) for p in pids_raw.split(",") if to_int(p) is not None}
+        term_ttys = {t.strip() for t in ttys_raw.split(",") if t.strip()}
 
-        if not term_wids:
-            wids, pids, d_id = find_terminal_windows(get_ancestor_pids())
+        if not term_wids and not term_pids:
+            ancestors = get_ancestor_pids()
+            wids, pids, d_id = find_terminal_windows(ancestors)
             term_wids = wids
             term_pids = pids
+            if not term_ttys:
+                term_ttys = get_ancestor_ttys(ancestors)
             if d_id:
                 desktop_id = d_id
 
@@ -84,7 +113,7 @@ def main() -> None:
         max_audio = int(os.environ.get("AGENT_ALARM_MAX_AUDIO", "180"))
         max_wait = int(os.environ.get("AGENT_ALARM_MAX_WAIT", "600"))
 
-        run_daemon(agent_name, desktop_id, term_wids, term_pids, sound_file, volume, max_audio, max_wait)
+        run_daemon(agent_name, desktop_id, term_wids, term_pids, sound_file, volume, max_audio, max_wait, term_ttys=term_ttys)
         return
 
     # --------------------------------------------------------------------------
@@ -126,19 +155,18 @@ def main() -> None:
 
     ancestors = get_ancestor_pids()
     term_wids, term_pids, desktop_id = find_terminal_windows(ancestors)
+    term_ttys = get_ancestor_ttys(ancestors | term_pids)
     current_active = get_active_window_id()
     current_active_int = to_int(current_active)
 
-    is_already_active = False
-    if current_active_int and current_active_int in term_wids:
-        is_already_active = True
+    is_already_active = is_terminal_focused(term_wids, term_pids | ancestors, current_active_int)
 
     sound_file = resolve_sound_file()
     volume = os.environ.get("AGENT_ALARM_VOLUME", "1.0").strip()
 
     if is_already_active and not ("--force" in args):
         # User is already looking at the terminal window
-        play_single_sound(sound_file, volume)
+        play_single_sound(sound_file, volume, background=True)
         send_notification(agent_name, desktop_id)
         print("{}")
         sys.exit(0)
@@ -148,8 +176,9 @@ def main() -> None:
 
     wids_arg = ",".join(str(w) for w in term_wids)
     pids_arg = ",".join(str(p) for p in (term_pids | ancestors))
+    ttys_arg = ",".join(term_ttys)
     daemon_cmd = [
-        sys.executable,
+        get_python_executable(),
         "-m",
         "agent_dock_bell.cli",
         "--daemon",
@@ -157,6 +186,7 @@ def main() -> None:
         desktop_id,
         wids_arg,
         pids_arg,
+        ttys_arg,
     ]
 
     subprocess.Popen(

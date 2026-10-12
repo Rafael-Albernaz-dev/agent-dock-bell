@@ -3,16 +3,17 @@
 [![Linux](https://img.shields.io/badge/OS-Linux-FCC624?logo=linux&logoColor=black)](#)
 [![Python 3](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)](#)
 [![CI](https://github.com/Rafael-Albernaz-dev/agent-dock-bell/actions/workflows/ci.yml/badge.svg)](https://github.com/Rafael-Albernaz-dev/agent-dock-bell/actions/workflows/ci.yml)
-[![X11 / D-Bus](https://img.shields.io/badge/IPC-X11%20%7C%20D--Bus-orange)](#)
+[![Wayland / X11 / D-Bus](https://img.shields.io/badge/IPC-Wayland%20%7C%20X11%20%7C%20D--Bus-orange)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A focus-aware, zero-friction desktop alert daemon designed for **AI CLI Agents** (Google Antigravity CLI, OpenAI Codex CLI, Hermes Agent, and custom developer workflows).
+A focus-aware, zero-friction desktop alert daemon designed for **AI CLI Agents** (Google Antigravity CLI, OpenAI Codex CLI, Hermes Agent, and custom developer workflows) on **Ubuntu / Linux (Wayland & X11)**.
 
 When long-running agent reasoning or multi-step tool executions finish, `agent-dock-bell`:
 1. 🎵 Plays a subtle, non-intrusive audio chime on a gentle loop.
 2. 📌 Sets an unread badge (`"1"`) and urgency hint on your Ubuntu / GNOME Dock icon.
 3. 💃 Triggers the native dock icon dance/wiggle animation.
-4. ⚡ **Instantly silences and resets everything the exact millisecond you click or switch back to the terminal.**
+4. 🔔 Displays a native desktop notification (`notify-send`) with agent name and status.
+5. ⚡ **Instantly silences and resets everything the exact millisecond you click, focus, or type in the terminal tab.**
 
 No modal confirmation dialogs. No dismiss buttons. Pure keyboard and focus flow.
 
@@ -50,22 +51,26 @@ flowchart TD
         E --> G[Acquire PID Lock]
         G --> H1[Audio Worker: Looped Chime]
         G --> H2[D-Bus: Unity LauncherEntry Badge '1']
-        G --> H3[ctypes / X11: Set XUrgencyHint]
-        G --> H4[xprop -spy: Root Window Focus Loop]
+        G --> H3[Desktop Notification: notify-send 5s]
+        G --> H4[Focus Monitor: Wayland AT-SPI & X11 xprop]
+        G --> H5[Activity Monitor: TTY /dev/pts interaction]
         
         H4 -->|User clicks/focuses Terminal| I[Trigger Cleanup]
+        H5 -->|User types in Terminal| I
         I --> J1[Terminate Audio Process]
         I --> J2[Clear Dock Badge & Urgency]
         I --> J3[Reset Dash-to-Dock Animation Actor]
-        I --> J4[Close Desktop Notification]
-        I --> J5[Release PID Lock & Terminate]
+        I --> J4[Release PID Lock & Terminate]
     end
 ```
 
 ### Engineering Highlights
 * **`< 50ms` Hook Return**: Exits immediately with `{}` to satisfy agent lifecycle timeouts and prevent `SIGKILL`.
-* **Modular Software Design**: Clean separation between D-Bus, X11 ctypes bindings, audio streaming, daemon locking, and CLI logic.
-* **Zero External Dependencies**: Built entirely with the Python standard library and POSIX syscalls (`libX11.so.6`).
+* **Full Wayland & X11 Focus Detection**: Seamlessly detects window and tab focus on modern Wayland compositors (GNOME Shell, Mutter) via AT-SPI (`gi.repository.Atspi`) as well as X11 (`_NET_ACTIVE_WINDOW`).
+* **Instant TTY Keypress Silencing**: Monitors `/dev/pts/*` slave TTY device interactions to instantly stop alarms upon any keystroke.
+* **Virtualenv Immunity**: Automatically discovers system Python runtimes with accessible GTK/AT-SPI libraries (`get_python_executable`), ensuring hooks invoked from agent venvs (like Hermes) work reliably out of the box.
+* **Non-intrusive Desktop Notifications**: Delivers desktop notifications that stay visible and persist in the notification drawer without premature dismissal.
+* **Modular Software Design**: Clean separation between D-Bus, AT-SPI, X11 ctypes bindings, audio streaming, daemon locking, and CLI logic.
 * **Process Tree Resolution**: Traverses `/proc/<pid>/status` to resolve parent terminal emulator processes (such as `gnome-terminal-server`, Tilix, Ptyxis, Alacritty, Kitty) even across tabbed multi-process trees.
 * **Clutter Animation Actor Reset**: Toggles `dash-to-dock`'s `dance-urgent-applications` setting on cleanup to ensure GNOME Shell Clutter timelines do not linger after focus is restored.
 * **Resilient Audio Loop**: Wraps PipeWire (`pw-play`) and Canberra (`canberra-gtk-play`) playback with timeout watchers to prevent device sink hangs.
@@ -83,12 +88,13 @@ agent-dock-bell/
 │   ├── __init__.py
 │   ├── cli.py                     # High-speed hook launcher (<50ms) & stdin parsing
 │   ├── daemon.py                  # Background daemon lifecycle & PID locking
-│   ├── x11.py                     # libX11 ctypes bindings, XUrgencyHint & window focus
+│   ├── x11.py                     # Wayland AT-SPI & X11 libX11 ctypes bindings
 │   ├── dock.py                    # D-Bus Unity LauncherEntry, notifications & Clutter reset
 │   └── audio.py                   # Looped audio worker with PipeWire & Canberra fallbacks
 └── tests/
     ├── test_cli.py                # Agent payload validation (Antigravity, Codex, Hermes)
     ├── test_x11.py                # Hex/int window normalization & ancestry resolution
+    ├── test_dock.py               # Desktop notifications & D-Bus badge tests
     ├── test_audio.py              # Sound command generation & preset resolution
     └── test_daemon.py             # PID lock lifecycle & cleanup tests
 ```

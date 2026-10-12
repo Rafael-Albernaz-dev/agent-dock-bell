@@ -52,6 +52,21 @@ def test_should_skip_hermes_intermediate_events():
     }
     assert should_skip_event("", payload_interrupted, []) is True
 
+    # Real Hermes canonical payload with top-level fields
+    payload_hermes_root_ok = {
+        "hook_event_name": "on_session_end",
+        "completed": True,
+        "interrupted": False,
+    }
+    assert should_skip_event("", payload_hermes_root_ok, []) is False
+
+    payload_hermes_root_interrupted = {
+        "hook_event_name": "on_session_end",
+        "completed": False,
+        "interrupted": True,
+    }
+    assert should_skip_event("", payload_hermes_root_interrupted, []) is True
+
 def test_should_skip_codex_tool_use():
     payload_tool = {"stop_reason": "tool_use"}
     assert should_skip_event("", payload_tool, []) is True

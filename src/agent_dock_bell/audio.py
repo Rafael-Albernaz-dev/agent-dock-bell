@@ -39,11 +39,22 @@ def get_sound_cmd(sound_file: str, volume: str = "1.0") -> List[str]:
     cmd.append(sound_file)
     return cmd
 
-def play_single_sound(sound_file: str, volume: str = "1.0") -> None:
-    """Play the completion sound once with timeout protection."""
+def play_single_sound(sound_file: str, volume: str = "1.0", background: bool = False) -> None:
+    """Play the completion sound once with timeout protection or fire-and-forget background mode."""
     if not sound_file or not os.path.exists(sound_file):
         return
     cmd = get_sound_cmd(sound_file, volume)
+    if background:
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            try:
+                subprocess.Popen(["canberra-gtk-play", "-f", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                return
+
     try:
         r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
         if r.returncode != 0:
@@ -120,7 +131,7 @@ class AudioLoopWorker:
             if self.stop_event.wait(self.interval):
                 break
 
-def kill_audio_processes(sound_file: str) -> None:
+def kill_audio_processes(sound_file: str = "") -> None:
     """Kill lingering audio playback processes owned by current user."""
     uid = str(os.getuid())
     if sound_file:
@@ -130,6 +141,10 @@ def kill_audio_processes(sound_file: str) -> None:
             pass
     try:
         subprocess.run(["pkill", "-u", uid, "-x", "pw-play"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["pkill", "-u", uid, "-x", "canberra-gtk-play"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    try:
+        # canberra-gtk-play is 17 chars (exceeds Linux TASK_COMM_LEN of 15), so -f is required
+        subprocess.run(["pkill", "-u", uid, "-f", "canberra-gtk-play"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass

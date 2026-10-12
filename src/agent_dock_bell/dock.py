@@ -28,13 +28,14 @@ def set_dock_badge(desktop_id: str, count: int, urgent: bool = True) -> None:
 
 def send_notification(agent_name: str, desktop_id: str) -> Optional[int]:
     """Send a desktop notification via notify-send and return the notification ID."""
+    icon = desktop_id.removesuffix(".desktop") if desktop_id else "utilities-terminal"
     try:
         cmd = [
             "notify-send", "-p",
             "-u", "normal",
+            "-t", "5000",
             "-a", agent_name,
-            "-i", "org.gnome.Terminal",
-            "-h", f"string:desktop-entry:{desktop_id}",
+            "-i", icon,
             "Task Completed!",
             f"{agent_name} has finished executing.",
         ]

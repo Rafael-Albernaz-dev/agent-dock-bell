@@ -19,3 +19,13 @@ def test_get_sound_cmd_volume():
 
     cmd_custom = get_sound_cmd("/path/to/sound.oga", "0.7")
     assert cmd_custom == ["pw-play", "--volume", "0.7", "/path/to/sound.oga"]
+
+def test_kill_audio_processes():
+    from agent_dock_bell.audio import kill_audio_processes
+    with patch("subprocess.run") as mock_sub:
+        kill_audio_processes("/path/to/sound.oga")
+        assert mock_sub.call_count >= 3
+        calls = [c[0][0] for c in mock_sub.call_args_list]
+        assert any("pw-play" in cmd for cmd in calls)
+        assert any("canberra-gtk-play" in cmd for cmd in calls)
+

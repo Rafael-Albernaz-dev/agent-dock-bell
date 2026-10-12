@@ -111,14 +111,145 @@ def get_active_window_id() -> Optional[str]:
         pass
     return None
 
+KNOWN_TERMINAL_BINARIES = {
+    "gnome-terminal": "org.gnome.Terminal.desktop",
+    "gnome-terminal-server": "org.gnome.Terminal.desktop",
+    "ptyxis": "org.gnome.Ptyxis.desktop",
+    "alacritty": "Alacritty.desktop",
+    "kitty": "kitty.desktop",
+    "tilix": "com.gexperts.Tilix.desktop",
+    "konsole": "org.kde.konsole.desktop",
+    "foot": "foot.desktop",
+    "wezterm": "org.wezfurlong.wezterm.desktop",
+    "wezterm-gui": "org.wezfurlong.wezterm.desktop",
+    "xfce4-terminal": "xfce4-terminal.desktop",
+    "terminator": "terminator.desktop",
+    "xterm": "xterm.desktop",
+    "code": "code.desktop",
+}
+
+def detect_terminal_process(ancestor_pids: Set[int]) -> Tuple[Set[int], str]:
+    """Inspect /proc to discover terminal emulator processes and desktop IDs among ancestors."""
+    detected_pids: Set[int] = set()
+    detected_desktop_id = "org.gnome.Terminal.desktop"
+    for pid in ancestor_pids:
+        try:
+            comm = ""
+            cmdline = ""
+            comm_path = f"/proc/{pid}/comm"
+            if os.path.exists(comm_path):
+                with open(comm_path, "r", errors="ignore") as f:
+                    comm = f.read().strip().lower()
+            cmdline_path = f"/proc/{pid}/cmdline"
+            if os.path.exists(cmdline_path):
+                with open(cmdline_path, "rb") as f:
+                    cmdline = f.read().decode("utf-8", "replace").lower()
+            for term_bin, d_id in KNOWN_TERMINAL_BINARIES.items():
+                if term_bin in comm or term_bin in cmdline:
+                    detected_pids.add(pid)
+                    detected_desktop_id = d_id
+                    break
+        except Exception:
+            pass
+    return detected_pids, detected_desktop_id
+
+def get_ancestor_ttys(ancestor_pids: Set[int]) -> Set[str]:
+    """Inspect open file descriptors of ancestors in /proc to find terminal slave TTYs (pts)."""
+    ttys: Set[str] = set()
+    for pid in ancestor_pids:
+        fd_dir = f"/proc/{pid}/fd"
+        if not os.path.isdir(fd_dir):
+            continue
+        try:
+            for entry in os.listdir(fd_dir):
+                target_path = os.path.join(fd_dir, entry)
+                try:
+                    target = os.readlink(target_path)
+                    if target.startswith("/dev/pts/") or (target.startswith("/dev/tty") and not target.endswith("null")):
+                        ttys.add(target)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return ttys
+
+def is_terminal_active_atspi(term_pids: Set[int]) -> bool:
+    """
+    Query AT-SPI to check if any terminal window currently has active focus on Wayland or X11.
+    """
+    try:
+        import gi
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+        Atspi.init()
+        desktop = Atspi.get_desktop(0)
+        if not desktop:
+            return False
+        child_count = desktop.get_child_count()
+        for i in range(child_count):
+            try:
+                app = desktop.get_child_at_index(i)
+                if not app:
+                    continue
+                pid = app.get_process_id()
+                name = (app.get_name() or "").lower()
+                is_candidate = bool(
+                    (term_pids and pid in term_pids)
+                    or any(
+                        t in name
+                        for t in (
+                            "gnome-terminal",
+                            "terminal",
+                            "ptyxis",
+                            "alacritty",
+                            "kitty",
+                            "tilix",
+                            "konsole",
+                            "foot",
+                            "wezterm",
+                            "code",
+                        )
+                    )
+                )
+                if not is_candidate:
+                    continue
+                for j in range(app.get_child_count()):
+                    try:
+                        win = app.get_child_at_index(j)
+                        if not win:
+                            continue
+                        state_set = win.get_state_set()
+                        if state_set.contains(Atspi.StateType.ACTIVE) or state_set.contains(Atspi.StateType.FOCUSED):
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+def is_terminal_focused(
+    term_wids: Set[int],
+    term_pids: Set[int],
+    current_active_wid: Optional[int] = None,
+) -> bool:
+    """
+    Determine if terminal window is currently focused via X11 active window or Wayland AT-SPI.
+    """
+    if current_active_wid is not None and current_active_wid != 0 and current_active_wid in term_wids:
+        return True
+    return is_terminal_active_atspi(term_pids)
+
 def find_terminal_windows(ancestor_pids: Set[int]) -> Tuple[Set[int], Set[int], str]:
     """
-    Search _NET_CLIENT_LIST for windows matching ancestor PIDs or terminal WM_CLASS.
+    Search _NET_CLIENT_LIST for windows matching ancestor PIDs or terminal WM_CLASS,
+    and inspect /proc to identify terminal processes even on Wayland without X11 windows.
     Returns: (term_wids, term_pids, detected_desktop_id)
     """
     term_wids: Set[int] = set()
-    term_pids: Set[int] = set()
-    detected_desktop_id = "org.gnome.Terminal.desktop"
+    proc_pids, detected_desktop_id = detect_terminal_process(ancestor_pids)
+    term_pids: Set[int] = set(proc_pids)
 
     try:
         out = subprocess.check_output(
@@ -143,7 +274,7 @@ def find_terminal_windows(ancestor_pids: Set[int]) -> Tuple[Set[int], Set[int], 
                         wm_class = line.lower()
 
                 is_match = False
-                if pid and pid in ancestor_pids:
+                if pid and (pid in ancestor_pids or pid in term_pids):
                     is_match = True
                     term_pids.add(pid)
                 elif any(t in wm_class for t in ["gnome-terminal", "terminal", "ptyxis", "alacritty", "kitty", "tilix"]):
