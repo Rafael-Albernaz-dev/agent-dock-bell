@@ -27,7 +27,9 @@ XUrgencyHint = 1 << 8
 # Initialize libX11 bindings
 try:
     _x11 = ctypes.CDLL("libX11.so.6")
+    _x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
     _x11.XOpenDisplay.restype = c_void_p
+    _x11.XGetWMHints.argtypes = [c_void_p, c_ulong]
     _x11.XGetWMHints.restype = POINTER(XWMHints)
     _x11.XSetWMHints.argtypes = [c_void_p, c_ulong, POINTER(XWMHints)]
     _x11.XFree.argtypes = [c_void_p]
@@ -62,12 +64,15 @@ def set_window_urgency(wid: int, enable: bool = True) -> None:
             return
         hints = _x11.XGetWMHints(_display, wid_int)
         if hints:
-            if enable:
-                hints.contents.flags |= XUrgencyHint
-            else:
-                hints.contents.flags &= ~XUrgencyHint
-            _x11.XSetWMHints(_display, wid_int, hints)
-            _x11.XFlush(_display)
+            try:
+                if enable:
+                    hints.contents.flags |= XUrgencyHint
+                else:
+                    hints.contents.flags &= ~XUrgencyHint
+                _x11.XSetWMHints(_display, wid_int, hints)
+                _x11.XFlush(_display)
+            finally:
+                _x11.XFree(hints)
     except Exception:
         pass
 
@@ -87,22 +92,29 @@ def get_ancestor_pids() -> Set[int]:
     curr = os.getpid()
     while curr > 1:
         try:
+            parent = None
             with open(f"/proc/{curr}/status") as f:
                 for line in f:
                     if line.startswith("PPid:"):
-                        curr = int(line.split()[1])
-                        pids.append(curr)
+                        parent = int(line.split()[1])
                         break
+            if parent is None or parent == curr:
+                break
+            curr = parent
+            if curr > 1:
+                pids.append(curr)
         except Exception:
             break
     return set(pids)
 
 def get_active_window_id() -> Optional[str]:
     """Query X11 root window for the currently active window hex ID."""
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        return None
     try:
         out = subprocess.check_output(
             ["xprop", "-root", "_NET_ACTIVE_WINDOW"],
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL, timeout=0.3
         ).decode()
         m = re.search(r"0x[0-9a-fA-F]+", out)
         if m:
@@ -111,9 +123,15 @@ def get_active_window_id() -> Optional[str]:
         pass
     return None
 
+VSCODE_DESKTOP_ID = (
+    "com.microsoft.VSCode.desktop"
+    if os.path.exists("/usr/share/applications/com.microsoft.VSCode.desktop")
+    else "code.desktop"
+)
+
 KNOWN_TERMINAL_BINARIES = {
-    "gnome-terminal": "org.gnome.Terminal.desktop",
     "gnome-terminal-server": "org.gnome.Terminal.desktop",
+    "gnome-terminal": "org.gnome.Terminal.desktop",
     "ptyxis": "org.gnome.Ptyxis.desktop",
     "alacritty": "Alacritty.desktop",
     "kitty": "kitty.desktop",
@@ -125,17 +143,23 @@ KNOWN_TERMINAL_BINARIES = {
     "xfce4-terminal": "xfce4-terminal.desktop",
     "terminator": "terminator.desktop",
     "xterm": "xterm.desktop",
-    "code": "code.desktop",
+    "chatgpt": "chatgpt.desktop",
+    "code": VSCODE_DESKTOP_ID,
+    "code-insiders": "code-insiders.desktop",
+    "vscodium": "vscodium.desktop",
 }
 
 def detect_terminal_process(ancestor_pids: Set[int]) -> Tuple[Set[int], str]:
     """Inspect /proc to discover terminal emulator processes and desktop IDs among ancestors."""
-    detected_pids: Set[int] = set()
+    native_pids: Set[int] = set()
+    embedded_pids: Set[int] = set()
     detected_desktop_id = "org.gnome.Terminal.desktop"
+    native_term_found = False
+
     for pid in ancestor_pids:
         try:
             comm = ""
-            cmdline = ""
+            bin_name = ""
             comm_path = f"/proc/{pid}/comm"
             if os.path.exists(comm_path):
                 with open(comm_path, "r", errors="ignore") as f:
@@ -143,15 +167,30 @@ def detect_terminal_process(ancestor_pids: Set[int]) -> Tuple[Set[int], str]:
             cmdline_path = f"/proc/{pid}/cmdline"
             if os.path.exists(cmdline_path):
                 with open(cmdline_path, "rb") as f:
-                    cmdline = f.read().decode("utf-8", "replace").lower()
+                    raw = f.read()
+                    args = [a.decode("utf-8", "replace").lower() for a in raw.split(b"\0") if a]
+                    if args:
+                        bin_name = os.path.basename(args[0])
+
             for term_bin, d_id in KNOWN_TERMINAL_BINARIES.items():
-                if term_bin in comm or term_bin in cmdline:
-                    detected_pids.add(pid)
-                    detected_desktop_id = d_id
+                is_match = False
+                if bin_name == term_bin or comm == term_bin:
+                    is_match = True
+                elif len(comm) == 15 and term_bin.startswith(comm):
+                    is_match = True
+
+                if is_match:
+                    is_embedded = term_bin in ("code", "code-insiders", "vscodium", "chatgpt")
+                    (embedded_pids if is_embedded else native_pids).add(pid)
+                    # An embedded terminal is a fallback only when no native terminal exists.
+                    if not native_term_found or not is_embedded:
+                        detected_desktop_id = d_id
+                        if not is_embedded:
+                            native_term_found = True
                     break
         except Exception:
             pass
-    return detected_pids, detected_desktop_id
+    return (native_pids or embedded_pids), detected_desktop_id
 
 def get_ancestor_ttys(ancestor_pids: Set[int]) -> Set[str]:
     """Inspect open file descriptors of ancestors in /proc to find terminal slave TTYs (pts)."""
@@ -176,7 +215,11 @@ def get_ancestor_ttys(ancestor_pids: Set[int]) -> Set[str]:
 def is_terminal_active_atspi(term_pids: Set[int]) -> bool:
     """
     Query AT-SPI to check if any terminal window currently has active focus on Wayland or X11.
+    Strictly filters by term_pids to minimize D-Bus traffic, prevent cross-app lag, and avoid
+    false positive focus triggers from Chromium/Electron background frames.
     """
+    if not term_pids:
+        return False
     try:
         import gi
         gi.require_version("Atspi", "2.0")
@@ -192,35 +235,33 @@ def is_terminal_active_atspi(term_pids: Set[int]) -> bool:
                 if not app:
                     continue
                 pid = app.get_process_id()
-                name = (app.get_name() or "").lower()
-                is_candidate = bool(
-                    (term_pids and pid in term_pids)
-                    or any(
-                        t in name
-                        for t in (
-                            "gnome-terminal",
-                            "terminal",
-                            "ptyxis",
-                            "alacritty",
-                            "kitty",
-                            "tilix",
-                            "konsole",
-                            "foot",
-                            "wezterm",
-                            "code",
-                        )
-                    )
-                )
-                if not is_candidate:
+
+                if pid not in term_pids:
                     continue
-                for j in range(app.get_child_count()):
+
+                app_name = (app.get_name() or "").lower()
+                is_electron = any(k in app_name for k in ("chatgpt", "codex", "electron", "code"))
+
+                win_count = app.get_child_count()
+                for j in range(win_count):
                     try:
                         win = app.get_child_at_index(j)
                         if not win:
                             continue
+
+                        # Chromium WebContents can report ACTIVE while its window is hidden.
+                        # Window order is not stable, so inspect all top-level window roles.
+                        if is_electron and win.get_role() not in (
+                            Atspi.Role.FRAME, Atspi.Role.WINDOW, Atspi.Role.DIALOG,
+                        ):
+                            continue
                         state_set = win.get_state_set()
-                        if state_set.contains(Atspi.StateType.ACTIVE) or state_set.contains(Atspi.StateType.FOCUSED):
-                            return True
+                        if is_electron:
+                            if state_set.contains(Atspi.StateType.FOCUSED):
+                                return True
+                        else:
+                            if state_set.contains(Atspi.StateType.ACTIVE) or state_set.contains(Atspi.StateType.FOCUSED):
+                                return True
                     except Exception:
                         continue
             except Exception:
@@ -251,19 +292,22 @@ def find_terminal_windows(ancestor_pids: Set[int]) -> Tuple[Set[int], Set[int], 
     proc_pids, detected_desktop_id = detect_terminal_process(ancestor_pids)
     term_pids: Set[int] = set(proc_pids)
 
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        return term_wids, term_pids, detected_desktop_id
+
     try:
         out = subprocess.check_output(
             ["xprop", "-root", "_NET_CLIENT_LIST"],
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL, timeout=0.3
         ).decode()
         for wid in re.findall(r"0x[0-9a-fA-F]+", out):
             try:
                 props = subprocess.check_output(
                     ["xprop", "-id", wid, "_NET_WM_PID", "WM_CLASS"],
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL, timeout=0.3
                 ).decode()
                 pid = None
-                wm_class = ""
+                wm_classes = []
                 for line in props.splitlines():
                     if "_NET_WM_PID" in line:
                         try:
@@ -271,25 +315,25 @@ def find_terminal_windows(ancestor_pids: Set[int]) -> Tuple[Set[int], Set[int], 
                         except Exception:
                             pass
                     elif "WM_CLASS" in line:
-                        wm_class = line.lower()
+                        wm_classes = [c.lower() for c in re.findall(r'"([^"]*)"', line)]
 
                 is_match = False
-                if pid and (pid in ancestor_pids or pid in term_pids):
+                if pid and pid in term_pids:
                     is_match = True
                     term_pids.add(pid)
-                elif any(t in wm_class for t in ["gnome-terminal", "terminal", "ptyxis", "alacritty", "kitty", "tilix"]):
-                    is_match = True
-                    if pid:
-                        term_pids.add(pid)
 
                 if is_match:
                     w_int = to_int(wid)
                     if w_int is not None:
                         term_wids.add(w_int)
-                    if "code" in wm_class:
-                        detected_desktop_id = "code.desktop"
-                    elif "gnome-terminal" in wm_class:
-                        detected_desktop_id = "org.gnome.Terminal.desktop"
+                    if not detected_desktop_id or detected_desktop_id == "org.gnome.Terminal.desktop":
+                        for c in wm_classes:
+                            if "chatgpt" in c:
+                                detected_desktop_id = "chatgpt.desktop"
+                                break
+                            elif c in ("code", "visual studio code", "vscodium"):
+                                detected_desktop_id = VSCODE_DESKTOP_ID
+                                break
             except Exception:
                 pass
     except Exception:
