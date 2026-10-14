@@ -1,26 +1,12 @@
 """
-CLI Entrypoint and High-Speed Launcher (<50ms exit).
+CLI entrypoint and detached alarm launcher.
 """
 
-import json
 import os
 import select
-import subprocess
 import sys
-from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional
-
-from .audio import play_single_sound, resolve_sound_file
-from .daemon import PIDLock, run_daemon
-from .dock import send_notification
-from .x11 import (
-    find_terminal_windows,
-    get_active_window_id,
-    get_ancestor_pids,
-    get_ancestor_ttys,
-    is_terminal_focused,
-    to_int,
-)
 
 def get_python_executable() -> str:
     """Return a python executable that has access to system libraries (like gi)."""
@@ -35,6 +21,7 @@ def get_python_executable() -> str:
 
 def build_daemon_environment() -> Dict[str, str]:
     """Ensure a detached daemon can import the package from this checkout."""
+    from pathlib import Path
     env = os.environ.copy()
     source_root = str(Path(__file__).resolve().parents[1])
     python_paths = [path for path in env.get("PYTHONPATH", "").split(os.pathsep) if path]
@@ -52,6 +39,8 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
     if raw_stdin:
         if "test-session" in raw_stdin or "synthetic" in raw_stdin:
             return True
+        if payload is None:
+            return True
 
     if isinstance(payload, dict):
         # 1. Antigravity CLI Stop Hook:
@@ -59,8 +48,12 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
             return True
 
         # 2. Hermes and Codex lifecycle hooks:
-        event_name = payload.get("hook_event_name")
-        if event_name and event_name not in ("on_session_end", "Stop"):
+        event_name = (
+            payload.get("hook_event_name")
+            or payload.get("hookEventName")
+            or payload.get("hook-event-name")
+        )
+        if event_name and event_name not in ("on_session_end", "Stop", "stop"):
             return True
         completed = payload.get("completed")
         interrupted = payload.get("interrupted")
@@ -74,11 +67,55 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
             return True
 
         # 3. Codex CLI Stop Hook:
-        stop_reason = payload.get("stop_reason")
+        stop_reason = (
+            payload.get("stop_reason")
+            or payload.get("stopReason")
+            or payload.get("stop-reason")
+        )
         if stop_reason in ("tool_use", "intermediate"):
             return True
 
     return False
+
+def read_hook_stdin(timeout: float = 0.02) -> tuple:
+    """Read a small complete JSON payload without waiting for pipe EOF."""
+    if sys.stdin.isatty():
+        return "", None
+    try:
+        import fcntl
+        fd = sys.stdin.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        return "", None
+
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        while len(data) < 65536:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(fd, min(8192, 65536 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+            try:
+                import json
+                raw = data.decode("utf-8")
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    return raw, payload
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+    except OSError:
+        pass
+    finally:
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+    return data.decode("utf-8", "replace"), None
 
 def main() -> None:
     args = sys.argv[1:]
@@ -87,6 +124,9 @@ def main() -> None:
     # 1. Daemon Execution Mode
     # --------------------------------------------------------------------------
     if "--daemon" in args:
+        from .audio import resolve_sound_file
+        from .daemon import run_daemon
+        from .x11 import find_terminal_windows, get_ancestor_pids, get_ancestor_ttys, to_int
         d_idx = args.index("--daemon")
         agent_name = args[d_idx + 1] if len(args) > d_idx + 1 else "AI Agent"
         desktop_id = args[d_idx + 2] if len(args) > d_idx + 2 else "org.gnome.Terminal.desktop"
@@ -108,6 +148,9 @@ def main() -> None:
             if d_id:
                 desktop_id = d_id
 
+        if not term_wids and not term_pids:
+            return
+
         sound_file = resolve_sound_file()
         volume = os.environ.get("AGENT_ALARM_VOLUME", "1.0").strip()
         max_audio = int(os.environ.get("AGENT_ALARM_MAX_AUDIO", "180"))
@@ -117,25 +160,22 @@ def main() -> None:
         return
 
     # --------------------------------------------------------------------------
-    # 2. Fast Launcher Mode (< 50ms exit)
+    # 2. Hook launcher
     # --------------------------------------------------------------------------
-    raw_stdin = ""
-    payload = None
-    if not sys.stdin.isatty():
-        try:
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if r:
-                raw_stdin = sys.stdin.read()
-                try:
-                    payload = json.loads(raw_stdin)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    raw_stdin, payload = read_hook_stdin()
 
     if should_skip_event(raw_stdin, payload, args):
         print("{}")
         sys.exit(0)
+
+    from .audio import play_single_sound, resolve_sound_file
+    from .daemon import PIDLock
+    from .dock import send_notification, send_terminal_bell
+    import subprocess
+    from .x11 import (
+        find_terminal_windows, get_active_window_id, get_ancestor_pids,
+        get_ancestor_ttys, is_terminal_focused, to_int,
+    )
 
     # Determine Agent Name
     agent_name = "AI Agent"
@@ -144,38 +184,42 @@ def main() -> None:
             agent_name = arg.strip()
             break
 
-    # Terminal audible bell (send to /dev/tty or stderr so stdout stays pure JSON)
-    try:
-        with open("/dev/tty", "w") as tty:
-            tty.write('\a')
-            tty.flush()
-    except Exception:
-        sys.stderr.write('\a')
-        sys.stderr.flush()
-
     ancestors = get_ancestor_pids()
     term_wids, term_pids, desktop_id = find_terminal_windows(ancestors)
     term_ttys = get_ancestor_ttys(ancestors | term_pids)
+
+    # A bell may request window attention when supported by the terminal.
+    send_terminal_bell(term_ttys)
+
     current_active = get_active_window_id()
     current_active_int = to_int(current_active)
 
-    is_already_active = is_terminal_focused(term_wids, term_pids | ancestors, current_active_int)
+    is_already_active = is_terminal_focused(term_wids, term_pids, current_active_int)
 
     sound_file = resolve_sound_file()
     volume = os.environ.get("AGENT_ALARM_VOLUME", "1.0").strip()
 
+    if not term_wids and not term_pids:
+        # Without an identified window/process, a persistent alarm cannot be
+        # dismissed reliably when the user returns to the terminal.
+        play_single_sound(sound_file, volume, background=True)
+        send_notification(agent_name, desktop_id, wait=False)
+        print("{}")
+        sys.exit(0)
+
     if is_already_active and not ("--force" in args):
         # User is already looking at the terminal window
         play_single_sound(sound_file, volume, background=True)
-        send_notification(agent_name, desktop_id)
+        send_notification(agent_name, desktop_id, wait=False)
         print("{}")
         sys.exit(0)
+
 
     # User is away / focused on another window: Fork detached background daemon
     PIDLock.kill_existing()
 
     wids_arg = ",".join(str(w) for w in term_wids)
-    pids_arg = ",".join(str(p) for p in (term_pids | ancestors))
+    pids_arg = ",".join(str(p) for p in term_pids)
     ttys_arg = ",".join(term_ttys)
     daemon_cmd = [
         get_python_executable(),

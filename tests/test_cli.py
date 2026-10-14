@@ -1,7 +1,11 @@
+import os
 import subprocess
 import sys
+import threading
+import time
+from unittest.mock import patch
 
-from agent_dock_bell.cli import build_daemon_environment, should_skip_event
+from agent_dock_bell.cli import build_daemon_environment, read_hook_stdin, should_skip_event
 
 def test_daemon_environment_imports_package_from_another_directory():
     result = subprocess.run(
@@ -71,8 +75,15 @@ def test_should_skip_codex_tool_use():
     payload_tool = {"stop_reason": "tool_use"}
     assert should_skip_event("", payload_tool, []) is True
 
+    # CamelCase stopReason from Codex
+    payload_tool_camel = {"stopReason": "tool_use"}
+    assert should_skip_event("", payload_tool_camel, []) is True
+
     payload_done = {"stop_reason": "end_turn"}
     assert should_skip_event("", payload_done, []) is False
+
+    payload_done_camel = {"stopReason": "end_turn"}
+    assert should_skip_event("", payload_done_camel, []) is False
 
 def test_should_process_codex_stop_hook_payload():
     payload_stop = {
@@ -85,3 +96,59 @@ def test_should_process_codex_stop_hook_payload():
     }
 
     assert should_skip_event("", payload_stop, []) is False
+
+    # CamelCase hookEventName
+    payload_stop_camel = {
+        "sessionId": "session-123",
+        "hookEventName": "Stop",
+        "turnId": "turn-123",
+    }
+    assert should_skip_event("", payload_stop_camel, []) is False
+
+def test_fragmented_hook_payload_is_read_before_decision(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    payload = b'{"hookEventName":"Stop","stopReason":"tool_use"}'
+    with os.fdopen(read_fd, "r") as reader:
+        monkeypatch.setattr(sys, "stdin", reader)
+        os.write(write_fd, payload[:15])
+
+        def finish_write():
+            time.sleep(0.005)
+            os.write(write_fd, payload[15:])
+            os.close(write_fd)
+
+        writer = threading.Thread(target=finish_write)
+        writer.start()
+        raw, parsed = read_hook_stdin(timeout=0.1)
+        writer.join()
+    assert raw == payload.decode()
+    assert parsed["stopReason"] == "tool_use"
+    assert should_skip_event(raw, parsed, []) is True
+
+def test_incomplete_hook_payload_does_not_start_alarm():
+    assert should_skip_event('{"hookEventName":', None, []) is True
+
+def test_unknown_terminal_uses_one_shot_alert_without_daemon():
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "Test Agent"]), \
+         patch("agent_dock_bell.cli.read_hook_stdin", return_value=("", None)), \
+         patch("agent_dock_bell.x11.get_ancestor_pids", return_value={123}), \
+         patch("agent_dock_bell.x11.find_terminal_windows", return_value=(set(), set(), "org.gnome.Terminal.desktop")), \
+         patch("agent_dock_bell.x11.get_ancestor_ttys", return_value=set()), \
+         patch("agent_dock_bell.x11.get_active_window_id", return_value=None), \
+         patch("agent_dock_bell.x11.is_terminal_focused", return_value=False), \
+         patch("agent_dock_bell.audio.resolve_sound_file", return_value="bell"), \
+         patch("agent_dock_bell.audio.play_single_sound") as sound, \
+         patch("agent_dock_bell.dock.send_terminal_bell"), \
+         patch("agent_dock_bell.dock.send_notification") as notify, \
+         patch("agent_dock_bell.daemon.PIDLock.kill_existing") as kill_existing, \
+         patch("subprocess.Popen") as spawn:
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    sound.assert_called_once()
+    notify.assert_called_once()
+    kill_existing.assert_not_called()
+    spawn.assert_not_called()
