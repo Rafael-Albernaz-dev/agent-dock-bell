@@ -92,9 +92,12 @@ class AudioLoopWorker:
                 except Exception:
                     try:
                         self._active_proc.kill()
+                        self._active_proc.wait(timeout=0.5)
                     except Exception:
                         pass
                 self._active_proc = None
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=1.0)
 
     def _run(self) -> None:
         start_time = time.time()
@@ -130,21 +133,3 @@ class AudioLoopWorker:
 
             if self.stop_event.wait(self.interval):
                 break
-
-def kill_audio_processes(sound_file: str = "") -> None:
-    """Kill lingering audio playback processes owned by current user."""
-    uid = str(os.getuid())
-    if sound_file:
-        try:
-            subprocess.run(["pkill", "-u", uid, "-f", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-    try:
-        subprocess.run(["pkill", "-u", uid, "-x", "pw-play"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-    try:
-        # canberra-gtk-play is 17 chars (exceeds Linux TASK_COMM_LEN of 15), so -f is required
-        subprocess.run(["pkill", "-u", uid, "-f", "canberra-gtk-play"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
