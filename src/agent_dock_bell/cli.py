@@ -47,7 +47,22 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
         if payload.get("fullyIdle") is False:
             return True
 
-        # 2. Hermes and Codex lifecycle hooks:
+        # 2. Skip subagent or background review turns
+        if (
+            payload.get("parent_session_id")
+            or payload.get("parentSessionId")
+            or payload.get("parent_id")
+            or payload.get("child_role")
+            or payload.get("is_subagent")
+            or payload.get("is_background")
+        ):
+            return True
+
+        origin = payload.get("write_origin") or payload.get("write_context")
+        if origin in ("background_review", "review"):
+            return True
+
+        # 3. Hermes and Codex lifecycle hooks:
         event_name = (
             payload.get("hook_event_name")
             or payload.get("hookEventName")
@@ -63,10 +78,21 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
                 completed = extra.get("completed")
             if "interrupted" in extra:
                 interrupted = extra.get("interrupted")
+            if (
+                extra.get("parent_session_id")
+                or extra.get("parentSessionId")
+                or extra.get("parent_id")
+                or extra.get("child_role")
+                or extra.get("is_subagent")
+                or extra.get("is_background")
+                or extra.get("write_origin") in ("background_review", "review")
+                or extra.get("write_context") in ("background_review", "review")
+            ):
+                return True
         if completed is False or interrupted is True:
             return True
 
-        # 3. Codex CLI Stop Hook:
+        # 4. Codex CLI Stop Hook:
         stop_reason = (
             payload.get("stop_reason")
             or payload.get("stopReason")
@@ -77,7 +103,7 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
 
     return False
 
-def read_hook_stdin(timeout: float = 0.02) -> tuple:
+def read_hook_stdin(timeout: float = 0.2) -> tuple:
     """Read a small complete JSON payload without waiting for pipe EOF."""
     if sys.stdin.isatty():
         return "", None

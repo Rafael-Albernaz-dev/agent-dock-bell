@@ -95,8 +95,7 @@ def set_dock_badge(desktop_id: str, count: int, urgent: bool = True) -> None:
 def send_notification(agent_name: str, desktop_id: str, wait: bool = True) -> Optional[int]:
     """
     Send a desktop notification via notify-send and return the notification ID if waiting.
-    Includes the desktop-entry hint so Ubuntu Dock can associate the notification
-    with an app icon and count it. Urgency is sent separately via LauncherEntry.
+    Omits desktop-entry hint so GNOME Shell displays the global notification banner at top of screen.
     """
     icon = desktop_id[:-8] if desktop_id.endswith(".desktop") else desktop_id
     icon = icon or "utilities-terminal"
@@ -106,7 +105,6 @@ def send_notification(agent_name: str, desktop_id: str, wait: bool = True) -> Op
         "-t", "5000",
         "-a", agent_name,
         "-i", icon,
-        "-h", f"string:desktop-entry:{icon}",
         "Task Completed!",
         f"{agent_name} has finished executing.",
     ]

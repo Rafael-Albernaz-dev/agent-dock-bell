@@ -145,3 +145,28 @@ def test_atspi_listener_deregistered_and_loop_joined(monkeypatch):
     assert set(listener.registered) == set(listener.deregistered)
     assert len(listener.registered) == 3
     assert loop.stop.is_set()
+
+def test_run_daemon_tty_activity_exit():
+    from agent_dock_bell.daemon import run_daemon
+
+    call_count = 0
+    def fake_stat(path):
+        nonlocal call_count
+        call_count += 1
+        mtime = 100.0 if call_count <= 1 else 105.0
+        return types.SimpleNamespace(st_mtime=mtime, st_atime=50.0)
+
+    with patch("agent_dock_bell.daemon.PIDLock.acquire", return_value=True), \
+         patch("agent_dock_bell.daemon.PIDLock.release"), \
+         patch("agent_dock_bell.daemon.AudioLoopWorker"), \
+         patch("agent_dock_bell.daemon.set_dock_badge"), \
+         patch("agent_dock_bell.daemon.set_window_urgency"), \
+         patch("agent_dock_bell.daemon.close_display"), \
+         patch("agent_dock_bell.daemon.is_terminal_active_atspi", return_value=False), \
+         patch("os.path.exists", return_value=True), \
+         patch("os.stat", side_effect=fake_stat), \
+         patch("os.kill", return_value=None), \
+         patch("sys.exit") as mock_exit:
+        run_daemon("TestAgent", "org.gnome.Terminal.desktop", set(), {1234}, "bell", max_wait=5, term_ttys={"/dev/pts/1"})
+        mock_exit.assert_called_with(0)
+

@@ -71,6 +71,27 @@ def test_should_skip_hermes_intermediate_events():
     }
     assert should_skip_event("", payload_hermes_root_interrupted, []) is True
 
+    # Hermes background review or subagent turns must be skipped
+    payload_hermes_background = {
+        "hook_event_name": "on_session_end",
+        "parent_session_id": "parent-sess-123",
+        "completed": True,
+    }
+    assert should_skip_event("", payload_hermes_background, []) is True
+
+    payload_hermes_review = {
+        "hook_event_name": "on_session_end",
+        "extra": {"write_origin": "background_review", "completed": True},
+    }
+    assert should_skip_event("", payload_hermes_review, []) is True
+
+    payload_hermes_child = {
+        "hook_event_name": "on_session_end",
+        "child_role": "subagent",
+        "completed": True,
+    }
+    assert should_skip_event("", payload_hermes_child, []) is True
+
 def test_should_skip_codex_tool_use():
     payload_tool = {"stop_reason": "tool_use"}
     assert should_skip_event("", payload_tool, []) is True

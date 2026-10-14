@@ -284,7 +284,7 @@ def run_daemon(
                 try:
                     if os.path.exists(tty):
                         st = os.stat(tty)
-                        initial_tty_stats[tty] = st.st_atime
+                        initial_tty_stats[tty] = (st.st_mtime, st.st_atime)
                 except Exception:
                     pass
 
@@ -311,11 +311,11 @@ def run_daemon(
 
             # Check D: TTY interaction (user pressed any key or entered input)
             tty_activity = False
-            for tty, i_atime in initial_tty_stats.items():
+            for tty, (i_mtime, i_atime) in initial_tty_stats.items():
                 try:
                     if os.path.exists(tty):
                         st = os.stat(tty)
-                        if st.st_atime > i_atime:
+                        if st.st_mtime > i_mtime or st.st_atime > i_atime:
                             tty_activity = True
                             break
                 except Exception:

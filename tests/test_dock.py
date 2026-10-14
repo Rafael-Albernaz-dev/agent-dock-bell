@@ -21,9 +21,8 @@ def test_send_notification_command():
         assert "-a" in cmd and "Hermes" in cmd
         assert "-t" in cmd and "5000" in cmd
         assert "-i" in cmd and "org.gnome.Terminal" in cmd
-        # The spec uses the desktop ID without .desktop; this associates the counter.
-        assert any("string:desktop-entry:org.gnome.Terminal" in arg for arg in cmd)
-        assert not any("string:desktop-entry:org.gnome.Terminal.desktop" in arg for arg in cmd)
+        # Ensure desktop-entry hint is not passed so GNOME displays the global banner
+        assert not any("string:desktop-entry:" in arg for arg in cmd)
 
 def test_send_notification_nowait():
     with patch("subprocess.Popen") as mock_popen:
@@ -33,7 +32,7 @@ def test_send_notification_nowait():
         cmd = mock_popen.call_args[0][0]
         assert "notify-send" in cmd
         assert "-p" not in cmd
-        assert any("string:desktop-entry:org.gnome.Terminal" in arg for arg in cmd)
+        assert not any("string:desktop-entry:" in arg for arg in cmd)
 
 def test_close_notification():
     with patch("subprocess.run") as mock_run:
