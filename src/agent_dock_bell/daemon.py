@@ -14,7 +14,10 @@ from typing import Optional, Set
 
 from .audio import AudioLoopWorker
 from .dock import send_notification, set_dock_badge
-from .x11 import close_display, is_terminal_active_atspi, set_window_urgency, to_int
+from .x11 import (
+    close_display, get_active_window_id, is_terminal_active_atspi,
+    is_terminal_focused, set_window_urgency, to_int,
+)
 
 PID_FILE = f"/tmp/agent-dock-bell-{os.getuid()}.pid"
 LEGACY_PID_FILE = f"/tmp/agent-alarm-{os.getuid()}.pid"
@@ -133,6 +136,12 @@ def run_daemon(
         if atspi_loop:
             try:
                 if atspi_loop.is_running():
+                    try:
+                        import gi
+                        from gi.repository import GLib
+                        GLib.idle_add(atspi_loop.quit)
+                    except Exception:
+                        pass
                     atspi_loop.quit()
             except Exception:
                 pass
@@ -169,6 +178,11 @@ def run_daemon(
     signal.signal(signal.SIGHUP, on_signal)
 
     try:
+        # Check if terminal/window is ALREADY active right now before doing anything
+        if is_terminal_focused(term_wids, term_pids, to_int(get_active_window_id())):
+            sys.exit(0)
+            return
+
         # 1. Dock badge & urgency
         set_dock_badge(desktop_id, 1, urgent=True)
 
@@ -183,7 +197,7 @@ def run_daemon(
         audio_worker.start()
 
         # 5. Non-blocking X11 focus monitor thread (if DISPLAY exists)
-        if os.environ.get("DISPLAY") and os.environ.get("XDG_SESSION_TYPE") != "wayland":
+        if os.environ.get("DISPLAY"):
             def _xprop_spy_worker():
                 nonlocal spy_proc
                 try:
@@ -249,11 +263,12 @@ def run_daemon(
                     source = ev.source
                     if not source:
                         return
-                    app = source.get_application()
-                    if not app:
-                        return
-                    pid = app.get_process_id()
-                    if pid in term_pids:
+                    app = source.get_application() if hasattr(source, "get_application") else None
+                    if not app and hasattr(source, "get_process_id"):
+                        pid = source.get_process_id()
+                    else:
+                        pid = app.get_process_id() if app else None
+                    if pid and pid in term_pids:
                         atspi_triggered.set()
                 except Exception:
                     pass
@@ -290,7 +305,7 @@ def run_daemon(
 
         # 8. Event-Driven Multi-Signal Focus & Activity Monitor Loop
         start_wait = time.monotonic()
-        last_atspi_poll = time.monotonic()
+        last_atspi_poll = 0.0
         while time.monotonic() - start_wait < max_wait:
             # Check A: X11 active window focus
             if xprop_triggered.is_set():
@@ -302,9 +317,9 @@ def run_daemon(
                 if is_terminal_active_atspi(term_pids):
                     break
 
-            # Check C: Low-frequency AT-SPI polling fallback (every 1.5s, targeted strictly at term_pids)
+            # Check C: Fast AT-SPI polling fallback (every 0.5s, targeted strictly at term_pids)
             now = time.monotonic()
-            if now - last_atspi_poll >= 1.5:
+            if now - last_atspi_poll >= 0.5:
                 last_atspi_poll = now
                 if term_pids and is_terminal_active_atspi(term_pids):
                     break

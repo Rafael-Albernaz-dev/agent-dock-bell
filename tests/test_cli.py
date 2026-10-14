@@ -173,3 +173,69 @@ def test_unknown_terminal_uses_one_shot_alert_without_daemon():
     notify.assert_called_once()
     kill_existing.assert_not_called()
     spawn.assert_not_called()
+
+def test_cli_stop_flag_kills_existing_and_exits(capsys):
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "--stop"]), \
+         patch("agent_dock_bell.daemon.PIDLock.kill_existing") as kill_existing, \
+         patch("agent_dock_bell.dock.set_dock_badge") as mock_badge, \
+         patch("agent_dock_bell.x11.close_display") as mock_close:
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    kill_existing.assert_called_once()
+    assert mock_badge.call_count >= 1
+    mock_close.assert_called_once()
+    captured = capsys.readouterr()
+    assert "Stopped active alarms" in captured.out
+
+def test_cli_test_flag_prints_diagnostics(capsys):
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "--test"]), \
+         patch("agent_dock_bell.audio.resolve_sound_file", return_value="/tmp/test.oga"), \
+         patch("agent_dock_bell.x11.get_ancestor_pids", return_value={10}), \
+         patch("agent_dock_bell.x11.find_terminal_windows", return_value=(set(), {10}, "test.desktop")), \
+         patch("agent_dock_bell.x11.get_active_window_id", return_value="0x123"):
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    captured = capsys.readouterr()
+    assert "diagnostics" in captured.out
+    assert "All systems operational" in captured.out
+
+def test_should_skip_event_force_bypasses_all_filters():
+    from agent_dock_bell.cli import should_skip_event
+
+    assert should_skip_event('{"hookEventName":', None, ["--force"]) is False
+    assert should_skip_event('{"extra": "test-session"}', None, ["--force"]) is False
+    assert should_skip_event("", {"fullyIdle": False}, ["--force"]) is False
+
+def test_already_active_kills_lingering_daemon():
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "Test Agent"]), \
+         patch("agent_dock_bell.cli.read_hook_stdin", return_value=("", None)), \
+         patch("agent_dock_bell.x11.get_ancestor_pids", return_value={123}), \
+         patch("agent_dock_bell.x11.find_terminal_windows", return_value=({456}, {123}, "org.gnome.Terminal.desktop")), \
+         patch("agent_dock_bell.x11.get_ancestor_ttys", return_value=set()), \
+         patch("agent_dock_bell.x11.get_active_window_id", return_value="0x1c8"), \
+         patch("agent_dock_bell.x11.is_terminal_focused", return_value=True), \
+         patch("agent_dock_bell.audio.resolve_sound_file", return_value="bell"), \
+         patch("agent_dock_bell.audio.play_single_sound") as sound, \
+         patch("agent_dock_bell.dock.send_terminal_bell"), \
+         patch("agent_dock_bell.dock.send_notification") as notify, \
+         patch("agent_dock_bell.daemon.PIDLock.kill_existing") as kill_existing, \
+         patch("subprocess.Popen") as spawn:
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    sound.assert_called_once()
+    notify.assert_called_once()
+    kill_existing.assert_called_once()
+    spawn.assert_not_called()
+

@@ -216,6 +216,9 @@ agent-dock-bell --test
 
 # Trigger a forced alert (switch to another window to see it loop and stop on return):
 agent-dock-bell --force "Test Run"
+
+# Instantly stop any active alarm daemon and clear dock badges:
+agent-dock-bell --stop
 ```
 
 ---

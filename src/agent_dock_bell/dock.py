@@ -41,6 +41,7 @@ def set_dock_badge(desktop_id: str, count: int, urgent: bool = True) -> None:
     Prefers native Gio D-Bus connection so the D-Bus bus name remains owned
     by the caller process (preventing immediate clearance on subprocess exit).
     """
+    desktop_id = desktop_id or "org.gnome.Terminal.desktop"
     global _session_bus
     try:
         import gi
@@ -97,6 +98,7 @@ def send_notification(agent_name: str, desktop_id: str, wait: bool = True) -> Op
     Send a desktop notification via notify-send and return the notification ID if waiting.
     Omits desktop-entry hint so GNOME Shell displays the global notification banner at top of screen.
     """
+    desktop_id = desktop_id or "org.gnome.Terminal.desktop"
     icon = desktop_id[:-8] if desktop_id.endswith(".desktop") else desktop_id
     icon = icon or "utilities-terminal"
     cmd = [

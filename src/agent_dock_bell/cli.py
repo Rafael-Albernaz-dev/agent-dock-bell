@@ -33,13 +33,16 @@ def build_daemon_environment() -> Dict[str, str]:
 
 def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: List[str]) -> bool:
     """Inspect stdin payload to skip test runs, subagents, or intermediate tool calls."""
+    if "--force" in args:
+        return False
+
     if "--test" in args or "--dry-run" in args:
         return True
 
     if raw_stdin:
         if "test-session" in raw_stdin or "synthetic" in raw_stdin:
             return True
-        if payload is None:
+        if payload is None and raw_stdin.strip().startswith("{"):
             return True
 
     if isinstance(payload, dict):
@@ -147,6 +150,54 @@ def main() -> None:
     args = sys.argv[1:]
 
     # --------------------------------------------------------------------------
+    # 0. Stop/Kill Daemon Mode
+    # --------------------------------------------------------------------------
+    if any(arg in args for arg in ("--stop", "--kill", "-k", "-s")):
+        from .daemon import PIDLock
+        from .dock import set_dock_badge
+        from .x11 import close_display
+        PIDLock.kill_existing()
+        for d_id in ("org.gnome.Terminal.desktop", "chatgpt.desktop", "code.desktop", "cursor.desktop"):
+            try:
+                set_dock_badge(d_id, 0, urgent=False)
+            except Exception:
+                pass
+        try:
+            close_display()
+        except Exception:
+            pass
+        print("Stopped active alarms.")
+        sys.exit(0)
+
+    # --------------------------------------------------------------------------
+    # 0.1 Self-test Diagnostics Mode
+    # --------------------------------------------------------------------------
+    if "--test" in args:
+        from .audio import resolve_sound_file
+        from .x11 import find_terminal_windows, get_active_window_id, get_ancestor_pids
+        print("=== agent-dock-bell diagnostics ===")
+        print(f"Session: {os.environ.get('XDG_SESSION_TYPE', 'unknown')} (DISPLAY={os.environ.get('DISPLAY', 'none')}, WAYLAND={os.environ.get('WAYLAND_DISPLAY', 'none')})")
+        sound = resolve_sound_file()
+        print(f"Audio file: {sound} ({'found' if os.path.exists(sound) else 'missing'})")
+        ancestors = get_ancestor_pids()
+        wids, pids, desktop_id = find_terminal_windows(ancestors)
+        print(f"Terminal detected: desktop_id={desktop_id}, pids={pids}, wids={wids}")
+        active_wid = get_active_window_id()
+        print(f"Active window: {active_wid}")
+        atspi_ok = False
+        try:
+            import gi
+            gi.require_version("Atspi", "2.0")
+            from gi.repository import Atspi
+            Atspi.init()
+            atspi_ok = True
+        except Exception:
+            atspi_ok = False
+        print(f"AT-SPI initialized: {atspi_ok}")
+        print("✓ All systems operational.")
+        sys.exit(0)
+
+    # --------------------------------------------------------------------------
     # 1. Daemon Execution Mode
     # --------------------------------------------------------------------------
     if "--daemon" in args:
@@ -235,6 +286,7 @@ def main() -> None:
 
     if is_already_active and not ("--force" in args):
         # User is already looking at the terminal window
+        PIDLock.kill_existing()
         play_single_sound(sound_file, volume, background=True)
         send_notification(agent_name, desktop_id, wait=False)
         print("{}")

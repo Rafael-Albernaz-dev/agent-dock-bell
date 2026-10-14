@@ -226,7 +226,90 @@ def test_x11_window_discovery_does_not_claim_unrelated_terminal():
 
     with patch("agent_dock_bell.x11.detect_terminal_process", return_value=(set(), "org.gnome.Terminal.desktop")), \
          patch("subprocess.check_output", side_effect=xprop), \
-         patch.dict("os.environ", {"XDG_SESSION_TYPE": "x11"}):
+         patch.dict("os.environ", {"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"}):
         windows, pids, _ = find_terminal_windows({111})
     assert windows == set()
     assert pids == set()
+
+def test_atspi_electron_active_frame_detected_as_focused():
+    """Verify that Electron/ChatGPT top-level frame with ACTIVE state is detected as active."""
+    from agent_dock_bell.x11 import is_terminal_active_atspi
+
+    role = types.SimpleNamespace(FRAME=1, WINDOW=2, DIALOG=3)
+    state = types.SimpleNamespace(ACTIVE=1, FOCUSED=2)
+
+    class Window:
+        def __init__(self, window_role, states):
+            self.window_role = window_role
+            self.states = states
+
+        def get_role(self):
+            return self.window_role
+
+        def get_state_set(self):
+            return self
+
+        def contains(self, value):
+            return value in self.states
+
+    class App:
+        def __init__(self, pid, children):
+            self.pid = pid
+            self.children = children
+
+        def get_process_id(self):
+            return self.pid
+
+        def get_name(self):
+            return "ChatGPT"
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    # ChatGPT frame has ACTIVE but not FOCUSED (standard Electron frame state on Linux)
+    chatgpt = App(933148, [Window(role.FRAME, {state.ACTIVE})])
+    desktop = types.SimpleNamespace(
+        get_child_count=lambda: 1,
+        get_child_at_index=lambda index: [chatgpt][index],
+    )
+    atspi = types.SimpleNamespace(Role=role, StateType=state, init=lambda: None,
+                                  get_desktop=lambda index: desktop)
+    gi = types.ModuleType("gi")
+    gi.require_version = lambda *args: None
+    repository = types.ModuleType("gi.repository")
+    repository.Atspi = atspi
+    with patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}):
+        assert is_terminal_active_atspi({933148}) is True
+
+def test_x11_window_discovery_on_wayland_with_display():
+    """Verify XWayland windows are discovered under Wayland when DISPLAY is available."""
+    from agent_dock_bell.x11 import find_terminal_windows
+
+    def xprop(args, **kwargs):
+        if "-root" in args:
+            return b"_NET_CLIENT_LIST(WINDOW): window id # 0x1200004\n"
+        return b'_NET_WM_PID(CARDINAL) = 933148\nWM_CLASS(STRING) = "chatgpt", "Chatgpt"\n'
+
+    with patch("agent_dock_bell.x11.detect_terminal_process", return_value=({933148}, "chatgpt.desktop")), \
+         patch("subprocess.check_output", side_effect=xprop), \
+         patch.dict("os.environ", {"DISPLAY": ":0", "XDG_SESSION_TYPE": "wayland"}):
+        windows, pids, desktop_id = find_terminal_windows({933148})
+    assert 0x1200004 in windows
+    assert 933148 in pids
+    assert desktop_id == "chatgpt.desktop"
+
+def test_is_terminal_focused_resolves_pid_from_xprop():
+    """Verify is_terminal_focused checks _NET_WM_PID for active window not yet in term_wids."""
+    from agent_dock_bell.x11 import is_terminal_focused
+
+    def fake_xprop(args, **kwargs):
+        return b"_NET_WM_PID(CARDINAL) = 933148\n"
+
+    term_wids = set()
+    with patch("subprocess.check_output", side_effect=fake_xprop):
+        assert is_terminal_focused(term_wids, {933148}, current_active_wid=0x1200004) is True
+    assert 0x1200004 in term_wids
+

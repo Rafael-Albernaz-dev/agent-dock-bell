@@ -170,3 +170,23 @@ def test_run_daemon_tty_activity_exit():
         run_daemon("TestAgent", "org.gnome.Terminal.desktop", set(), {1234}, "bell", max_wait=5, term_ttys={"/dev/pts/1"})
         mock_exit.assert_called_with(0)
 
+def test_run_daemon_exits_immediately_if_already_focused_on_startup():
+    from unittest.mock import patch, MagicMock
+    from agent_dock_bell.daemon import run_daemon
+
+    mock_audio = MagicMock()
+    with patch("agent_dock_bell.daemon.PIDLock.acquire", return_value=True), \
+         patch("agent_dock_bell.daemon.PIDLock.release"), \
+         patch("agent_dock_bell.daemon.AudioLoopWorker", return_value=mock_audio), \
+         patch("agent_dock_bell.daemon.set_dock_badge") as mock_badge, \
+         patch("agent_dock_bell.daemon.set_window_urgency") as mock_urgency, \
+         patch("agent_dock_bell.daemon.send_notification") as mock_notify, \
+         patch("agent_dock_bell.daemon.is_terminal_focused", return_value=True), \
+         patch("agent_dock_bell.daemon.close_display"), \
+         patch("sys.exit") as mock_exit:
+        run_daemon("TestAgent", "org.gnome.Terminal.desktop", {123}, {456}, "bell")
+        mock_exit.assert_called_with(0)
+        mock_audio.start.assert_not_called()
+        mock_notify.assert_not_called()
+
+
