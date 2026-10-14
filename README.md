@@ -6,14 +6,14 @@
 [![Wayland / X11 / D-Bus](https://img.shields.io/badge/IPC-Wayland%20%7C%20X11%20%7C%20D--Bus-orange)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A focus-aware, zero-friction desktop alert daemon designed for **AI CLI Agents** (Google Antigravity CLI, OpenAI Codex CLI, Hermes Agent, and custom developer workflows) on **Ubuntu / Linux (Wayland & X11)**.
+A focus-aware, zero-friction desktop alert daemon designed for **AI CLI Agents** (Google Antigravity CLI, OpenAI Codex CLI, ChatGPT Desktop App, Hermes Agent, Cursor, Windsurf, and custom developer workflows) on **Ubuntu / Linux (Wayland & X11)**.
 
 When long-running agent reasoning or multi-step tool executions finish, `agent-dock-bell`:
 1. 🎵 Plays a subtle, non-intrusive audio chime on a gentle loop.
 2. 📌 Sets an unread badge (`"1"`) and urgency hint on your Ubuntu / GNOME Dock icon.
 3. 💃 Triggers the native dock icon dance/wiggle animation.
 4. 🔔 Displays a native desktop notification (`notify-send`) with agent name and status.
-5. ⚡ Stops the alarm when the target terminal regains focus or detectable TTY input occurs.
+5. ⚡ Stops the alarm instantly when the target terminal/app regains focus or detectable TTY input occurs.
 
 No modal confirmation dialogs. No dismiss buttons. Pure keyboard and focus flow.
 
@@ -36,10 +36,10 @@ Developers naturally switch workspaces—to read documentation, review PRs, or c
 
 ```mermaid
 flowchart TD
-    A[Agent CLI Run Ends\nAntigravity / Codex / Hermes] -->|Hook Event via stdin JSON| B[agent-dock-bell Launcher]
+    A[Agent CLI Run Ends\nAntigravity / Codex / Hermes / ChatGPT] -->|Hook Event via stdin JSON| B[agent-dock-bell Launcher]
     
     subgraph Launcher [Detached Hook Launcher]
-        B --> C{Active Window\nis Terminal?}
+        B --> C{Active Window\nis Terminal/App?}
         C -->|Yes: User already watching| D[Play Single Chime & Exit 0]
         C -->|No: User is in another app| E[Fork Detached Daemon\nstart_new_session=True]
         E --> F[Print '{}' JSON & Exit 0]
@@ -49,13 +49,15 @@ flowchart TD
 
     subgraph Daemon [Detached Background Daemon]
         E --> G[Acquire PID Lock]
-        G --> H1[Audio Worker: Looped Chime]
+        G --> H0{Already Focused\non Startup?}
+        H0 -->|Yes| I
+        H0 -->|No| H1[Audio Worker: Looped Chime]
         G --> H2[D-Bus: Unity LauncherEntry Badge '1']
         G --> H3[Desktop Notification: notify-send 5s]
         G --> H4[Focus Monitor: Wayland AT-SPI & X11 xprop]
         G --> H5[Activity Monitor: TTY /dev/pts interaction]
         
-        H4 -->|User clicks/focuses Terminal| I[Trigger Cleanup]
+        H4 -->|User clicks/focuses Terminal or App| I[Trigger Cleanup]
         H5 -->|User types in Terminal| I
         I --> J1[Terminate Audio Process]
         I --> J2[Clear Dock Badge & Urgency]
@@ -65,17 +67,16 @@ flowchart TD
 
 ### Engineering Highlights
 * **Detached Hook Return**: Returns `{}` immediately after starting the detached daemon. Skipped intermediate events exit in ~40 ms, avoiding agent execution timeouts.
-* **Wayland & X11 Focus Detection**: Uses event-driven AT-SPI (`gi.repository.Atspi`) with `GLib.MainLoop` and X11 (`_NET_ACTIVE_WINDOW`) in X11 sessions.
-* **Zero UI Lag / AT-SPI Scoping**: AT-SPI tree inspection is strictly filtered by terminal PIDs (`term_pids`), eliminating D-Bus accessibility queries to unrelated applications and completely preventing UI stutter/frame drops in Electron apps (such as Codex UI / ChatGPT desktop).
-* **Click-to-Focus Notification**: Desktop notifications include the proper Freedesktop `desktop-entry` hint, allowing GNOME Shell to associate the notification with the application and bring the terminal forward when clicked.
-* **Atomic Kernel Locking**: Daemon exclusivity is managed via `fcntl.flock(LOCK_EX | LOCK_NB)` on the PID file, ensuring race-free concurrency and automatic lock cleanup even in case of abrupt termination.
+* **Hybrid Wayland & X11 Focus Detection**: Combines event-driven AT-SPI (`gi.repository.Atspi`) with `GLib.MainLoop` and X11/XWayland active window tracking (`_NET_ACTIVE_WINDOW`), ensuring reliable detection across both native Wayland and XWayland environments.
+* **Universal Electron & Modern App Support**: Correctly handles container window states (`ACTIVE` and `FOCUSED`) across Electron-based tools (ChatGPT Desktop, Codex, VS Code, Cursor, Windsurf) and modern terminal emulators (Ghostty, Alacritty, Kitty, Ptyxis, Warp, Tilix, Foot, WezTerm).
+* **Instant Startup Check**: Verifies whether the target window already gained focus while the daemon process was forking (~50 ms), completely eliminating false-alarm audio loops.
+* **Zero UI Lag / AT-SPI Scoping**: AT-SPI tree inspection is strictly filtered by target process IDs (`term_pids`), eliminating D-Bus accessibility queries to unrelated applications and preventing UI frame drops.
+* **Instant Alarm Control CLI (`--stop`)**: Built-in `agent-dock-bell --stop` (or `-k`) command to immediately silence any active background alarm and clear dock urgency badges.
+* **Comprehensive System Diagnostics (`--test`)**: Reports environment variables, audio player availability, D-Bus session status, active window ID, and AT-SPI accessibility health.
+* **Atomic Kernel Locking**: Daemon exclusivity is managed via `fcntl.flock(LOCK_EX | LOCK_NB)` on the PID file, ensuring race-free concurrency and automatic lock cleanup.
 * **Isolated Audio Process Management**: `AudioLoopWorker` tracks and terminates strictly its own playback process, avoiding session-wide `pkill` sweeps.
-* **Unknown Terminal Fallback**: Plays one chime and sends one notification when no target process or window can be identified, avoiding an alarm that cannot be dismissed by focus.
-* **TTY Activity Fallback**: Checks slave TTY access time when available; filesystem access-time policy can limit this signal.
-* **Virtualenv Immunity**: Automatically discovers system Python runtimes with accessible GTK/AT-SPI libraries (`get_python_executable`), ensuring hooks invoked from agent venvs (like Hermes) work reliably out of the box.
-* **Non-intrusive Desktop Notifications**: Delivers desktop notifications that stay visible and persist in the notification drawer without premature dismissal.
-* **Process Tree Resolution**: Traverses `/proc/<pid>/status` to resolve parent terminal emulator processes (such as `gnome-terminal-server`, Tilix, Ptyxis, Alacritty, Kitty) even across tabbed multi-process trees.
-* **Scoped Dock Cleanup**: Clears the application's Unity LauncherEntry urgency without changing the global Dash-to-Dock animation setting.
+* **Non-fatal Xlib Error Handling**: Installs a safe `XSetErrorHandler` in ctypes libX11 bindings to suppress asynchronous `BadWindow` crashes when windows close dynamically.
+* **Process Tree Resolution**: Traverses `/proc/<pid>/status` to resolve parent terminal emulator processes across tabbed and multi-process trees.
 * **Resilient Audio Loop**: Wraps PipeWire (`pw-play`) and Canberra (`canberra-gtk-play`) playback with timeout watchers to prevent device sink hangs.
 
 ---
