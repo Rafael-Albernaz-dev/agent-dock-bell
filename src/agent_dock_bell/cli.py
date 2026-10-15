@@ -265,8 +265,10 @@ def main() -> None:
     term_wids, term_pids, desktop_id = find_terminal_windows(ancestors)
     term_ttys = get_ancestor_ttys(ancestors | term_pids)
 
-    # A bell may request window attention when supported by the terminal.
-    send_terminal_bell(term_ttys)
+    # The TTY bell is audible in GNOME Terminal and would play the old chime
+    # alongside the configured sound. Dock urgency still requests attention.
+    if desktop_id != "org.gnome.Terminal.desktop":
+        send_terminal_bell(term_ttys)
 
     current_active = get_active_window_id()
     current_active_int = to_int(current_active)
@@ -280,7 +282,7 @@ def main() -> None:
         # Without an identified window/process, a persistent alarm cannot be
         # dismissed reliably when the user returns to the terminal.
         play_single_sound(sound_file, volume, background=True)
-        send_notification(agent_name, desktop_id, wait=False)
+        send_notification(agent_name, desktop_id, wait=False, term_pids=term_pids, term_ttys=term_ttys)
         print("{}")
         sys.exit(0)
 
@@ -288,7 +290,7 @@ def main() -> None:
         # User is already looking at the terminal window
         PIDLock.kill_existing()
         play_single_sound(sound_file, volume, background=True)
-        send_notification(agent_name, desktop_id, wait=False)
+        send_notification(agent_name, desktop_id, wait=False, term_pids=term_pids, term_ttys=term_ttys)
         print("{}")
         sys.exit(0)
 

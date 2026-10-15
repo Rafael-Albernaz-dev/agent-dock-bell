@@ -34,6 +34,21 @@ def test_send_notification_nowait():
         assert "-p" not in cmd
         assert not any("string:desktop-entry:" in arg for arg in cmd)
 
+def test_gnome_terminal_click_broker_keeps_notification_sender_alive():
+    with patch("agent_dock_bell.notification_broker.queue_terminal_notification", return_value=True) as broker, \
+         patch("subprocess.check_output") as legacy:
+        assert send_notification("Codex CLI", "org.gnome.Terminal.desktop", term_pids={123},
+                                 term_ttys={"/dev/pts/7"}) is None
+    broker.assert_called_once_with("Codex CLI", "org.gnome.Terminal.desktop", {123}, {"/dev/pts/7"})
+    legacy.assert_not_called()
+
+def test_gnome_terminal_click_broker_failure_preserves_banner():
+    with patch("agent_dock_bell.notification_broker.queue_terminal_notification", return_value=False), \
+         patch("subprocess.check_output", return_value=b"42\n") as legacy:
+        assert send_notification("Codex CLI", "org.gnome.Terminal.desktop", term_pids={123}) == 42
+    assert not any("string:desktop-entry:" in arg for arg in legacy.call_args.args[0])
+    assert "boolean:suppress-sound:true" in legacy.call_args.args[0]
+
 def test_close_notification():
     with patch("subprocess.run") as mock_run:
         close_notification(42)

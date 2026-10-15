@@ -191,7 +191,7 @@ def run_daemon(
             set_window_urgency(wid, True)
 
         # 3. Notification (the launcher has already sent the terminal bell)
-        send_notification(agent_name, desktop_id)
+        send_notification(agent_name, desktop_id, term_pids=term_pids, term_ttys=term_ttys)
 
         # 4. Audio loop
         audio_worker.start()

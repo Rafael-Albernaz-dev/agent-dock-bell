@@ -12,7 +12,7 @@ When long-running agent reasoning or multi-step tool executions finish, `agent-d
 1. 🎵 Plays a subtle, non-intrusive audio chime on a gentle loop.
 2. 📌 Sets an unread badge (`"1"`) and urgency hint on your Ubuntu / GNOME Dock icon.
 3. 💃 Triggers the native dock icon dance/wiggle animation.
-4. 🔔 Displays a native desktop notification (`notify-send`) with agent name and status.
+4. 🔔 Displays a native desktop notification with agent name and status. On GNOME Terminal, clicking it focuses the terminal.
 5. ⚡ Stops the alarm instantly when the target terminal/app regains focus or detectable TTY input occurs.
 
 No modal confirmation dialogs. No dismiss buttons. Pure keyboard and focus flow.
@@ -77,6 +77,7 @@ flowchart TD
 * **Isolated Audio Process Management**: `AudioLoopWorker` tracks and terminates strictly its own playback process, avoiding session-wide `pkill` sweeps.
 * **Non-fatal Xlib Error Handling**: Installs a safe `XSetErrorHandler` in ctypes libX11 bindings to suppress asynchronous `BadWindow` crashes when windows close dynamically.
 * **Process Tree Resolution**: Traverses `/proc/<pid>/status` to resolve parent terminal emulator processes across tabbed and multi-process trees.
+* **GNOME Terminal Notification Click**: A session broker keeps the click action available after the hook and alarm daemon exit. When several terminal windows exist, it identifies the source window from its TTY and focuses that window without switching tabs. If the source cannot be identified, the usual notification is shown.
 * **Resilient Audio Loop**: Wraps PipeWire (`pw-play`) and Canberra (`canberra-gtk-play`) playback with timeout watchers to prevent device sink hangs.
 
 ---
@@ -94,11 +95,13 @@ agent-dock-bell/
 │   ├── daemon.py                  # Background daemon lifecycle & PID locking
 │   ├── x11.py                     # Wayland AT-SPI & X11 libX11 ctypes bindings
 │   ├── dock.py                    # D-Bus Unity LauncherEntry, notifications & terminal bell
+│   ├── notification_broker.py     # GNOME Terminal notification actions and focus
 │   └── audio.py                   # Looped audio worker with PipeWire & Canberra fallbacks
 └── tests/
     ├── test_cli.py                # Agent payload validation (Antigravity, Codex, Hermes)
     ├── test_x11.py                # Hex/int window normalization & ancestry resolution
     ├── test_dock.py               # Desktop notifications & D-Bus badge tests
+    ├── test_notification_broker.py # Notification click action tests
     ├── test_audio.py              # Sound command generation & preset resolution
     └── test_daemon.py             # PID lock lifecycle & cleanup tests
 ```
@@ -194,9 +197,14 @@ hermes hooks doctor
 
 You can customize the audio chime and volume using environment variables:
 
+On this installation, the default sound is
+`~/Downloads/universfield-new-notification-02-323592.mp3` when that file exists;
+otherwise the Ubuntu Yaru bell is used. The GNOME Terminal hook avoids its
+separate TTY bell so that it does not play over the configured sound.
+
 ```bash
 # Available presets: "bell" (Ubuntu Yaru ding), "pop" (instant message), "click" (dry wood tap)
-export AGENT_ALARM_SOUND="bell"
+export AGENT_ALARM_SOUND="bell"  # Optional override
 
 # Volume level (e.g., 0.5 to 1.5)
 export AGENT_ALARM_VOLUME="1.0"

@@ -16,10 +16,12 @@ PRESET_SOUNDS = {
     "complete": "/usr/share/sounds/freedesktop/stereo/complete.oga",   # Classic freedesktop chime
 }
 
+DEFAULT_SOUND = str(Path.home() / "Downloads/universfield-new-notification-02-323592.mp3")
+
 def resolve_sound_file(sound_choice: Optional[str] = None) -> str:
     """Resolve sound file path from choice or environment variable."""
     if not sound_choice:
-        sound_choice = os.environ.get("AGENT_ALARM_SOUND", "bell").strip()
+        sound_choice = os.environ.get("AGENT_ALARM_SOUND", DEFAULT_SOUND).strip()
 
     if sound_choice in PRESET_SOUNDS and os.path.exists(PRESET_SOUNDS[sound_choice]):
         return PRESET_SOUNDS[sound_choice]

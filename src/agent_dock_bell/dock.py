@@ -93,12 +93,21 @@ def set_dock_badge(desktop_id: str, count: int, urgent: bool = True) -> None:
         except Exception:
             pass
 
-def send_notification(agent_name: str, desktop_id: str, wait: bool = True) -> Optional[int]:
+def send_notification(agent_name: str, desktop_id: str, wait: bool = True,
+                      term_pids: Optional[Set[int]] = None,
+                      term_ttys: Optional[Set[str]] = None) -> Optional[int]:
     """
-    Send a desktop notification via notify-send and return the notification ID if waiting.
-    Omits desktop-entry hint so GNOME Shell displays the global notification banner at top of screen.
+    Send a notification without the desktop-entry hint that can suppress banners.
+    GNOME Terminal notifications use a separate click broker when a target is known.
     """
     desktop_id = desktop_id or "org.gnome.Terminal.desktop"
+    if term_pids and desktop_id == "org.gnome.Terminal.desktop":
+        try:
+            from .notification_broker import queue_terminal_notification
+            if queue_terminal_notification(agent_name, desktop_id, term_pids, term_ttys):
+                return None
+        except Exception:
+            pass
     icon = desktop_id[:-8] if desktop_id.endswith(".desktop") else desktop_id
     icon = icon or "utilities-terminal"
     cmd = [
@@ -107,6 +116,7 @@ def send_notification(agent_name: str, desktop_id: str, wait: bool = True) -> Op
         "-t", "5000",
         "-a", agent_name,
         "-i", icon,
+        "-h", "boolean:suppress-sound:true",
         "Task Completed!",
         f"{agent_name} has finished executing.",
     ]

@@ -161,7 +161,7 @@ def test_unknown_terminal_uses_one_shot_alert_without_daemon():
          patch("agent_dock_bell.x11.is_terminal_focused", return_value=False), \
          patch("agent_dock_bell.audio.resolve_sound_file", return_value="bell"), \
          patch("agent_dock_bell.audio.play_single_sound") as sound, \
-         patch("agent_dock_bell.dock.send_terminal_bell"), \
+         patch("agent_dock_bell.dock.send_terminal_bell") as terminal_bell, \
          patch("agent_dock_bell.dock.send_notification") as notify, \
          patch("agent_dock_bell.daemon.PIDLock.kill_existing") as kill_existing, \
          patch("subprocess.Popen") as spawn:
@@ -170,6 +170,7 @@ def test_unknown_terminal_uses_one_shot_alert_without_daemon():
         except SystemExit as exc:
             assert exc.code == 0
     sound.assert_called_once()
+    terminal_bell.assert_not_called()
     notify.assert_called_once()
     kill_existing.assert_not_called()
     spawn.assert_not_called()
@@ -221,12 +222,12 @@ def test_already_active_kills_lingering_daemon():
          patch("agent_dock_bell.cli.read_hook_stdin", return_value=("", None)), \
          patch("agent_dock_bell.x11.get_ancestor_pids", return_value={123}), \
          patch("agent_dock_bell.x11.find_terminal_windows", return_value=({456}, {123}, "org.gnome.Terminal.desktop")), \
-         patch("agent_dock_bell.x11.get_ancestor_ttys", return_value=set()), \
+         patch("agent_dock_bell.x11.get_ancestor_ttys", return_value={"/dev/pts/7"}), \
          patch("agent_dock_bell.x11.get_active_window_id", return_value="0x1c8"), \
          patch("agent_dock_bell.x11.is_terminal_focused", return_value=True), \
          patch("agent_dock_bell.audio.resolve_sound_file", return_value="bell"), \
          patch("agent_dock_bell.audio.play_single_sound") as sound, \
-         patch("agent_dock_bell.dock.send_terminal_bell"), \
+         patch("agent_dock_bell.dock.send_terminal_bell") as terminal_bell, \
          patch("agent_dock_bell.dock.send_notification") as notify, \
          patch("agent_dock_bell.daemon.PIDLock.kill_existing") as kill_existing, \
          patch("subprocess.Popen") as spawn:
@@ -235,7 +236,8 @@ def test_already_active_kills_lingering_daemon():
         except SystemExit as exc:
             assert exc.code == 0
     sound.assert_called_once()
-    notify.assert_called_once()
+    terminal_bell.assert_not_called()
+    assert notify.call_args.kwargs["term_ttys"] == {"/dev/pts/7"}
     kill_existing.assert_called_once()
     spawn.assert_not_called()
 
