@@ -89,6 +89,11 @@ agent-dock-bell/
 ├── .github/workflows/ci.yml       # Automated GitHub Actions test suite
 ├── pyproject.toml                 # Standard PEP 621 packaging & CLI entrypoints
 ├── install.sh                     # Zero-dependency installer for ~/.local/bin
+├── RULES.md                       # Architecture contracts, anti-gaming rules & quality gates
+├── assets/                        # Bundled notification audio assets (.mp3)
+├── scripts/
+│   ├── run-tests.sh               # Universal test runner (.venv, uv, pytest, unittest)
+│   └── quality-gate.sh            # 5-tier automated Quality Gate enforcement
 ├── src/agent_dock_bell/
 │   ├── __init__.py
 │   ├── cli.py                     # Detached hook launcher & bounded stdin parsing
@@ -103,14 +108,19 @@ agent-dock-bell/
     ├── test_dock.py               # Desktop notifications & D-Bus badge tests
     ├── test_notification_broker.py # Notification click action tests
     ├── test_audio.py              # Sound command generation & preset resolution
-    └── test_daemon.py             # PID lock lifecycle & cleanup tests
+    ├── test_daemon.py             # PID lock lifecycle & cleanup tests
+    ├── test_regression.py         # Automated regression test suite (anti-gaming)
+    └── test_integration.py        # End-to-end integration test suite
 ```
 
-### Running Unit Tests
+### Running Test Suite & Quality Gates
 
 ```bash
-# Run tests with pytest:
-pytest -v
+# Run full test suite (70 tests: Unit + Regression + Integration):
+./scripts/run-tests.sh
+
+# Run strict 5-tier Quality Gate verification:
+./scripts/quality-gate.sh
 ```
 
 ---
