@@ -153,8 +153,8 @@ def test_run_daemon_tty_activity_exit():
     def fake_stat(path):
         nonlocal call_count
         call_count += 1
-        mtime = 100.0 if call_count <= 1 else 105.0
-        return types.SimpleNamespace(st_mtime=mtime, st_atime=50.0)
+        atime = 100.0 if call_count <= 1 else 105.0
+        return types.SimpleNamespace(st_mtime=50.0, st_atime=atime)
 
     with patch("agent_dock_bell.daemon.PIDLock.acquire", return_value=True), \
          patch("agent_dock_bell.daemon.PIDLock.release"), \

@@ -197,14 +197,13 @@ hermes hooks doctor
 
 You can customize the audio chime and volume using environment variables:
 
-On this installation, the default sound is
-`~/Downloads/universfield-new-notification-02-323592.mp3` when that file exists;
-otherwise the Ubuntu Yaru bell is used. The GNOME Terminal hook avoids its
-separate TTY bell so that it does not play over the configured sound.
+The default sound is the bundled chime:
+`assets/universfield-new-notification-02-323592.mp3` (also selectable via presets `"new"` or `"universfield"`).
+The resolver automatically searches bundled assets, `~/.local/share/sounds/`, secondary media mounts, and system presets. The terminal hook avoids its separate TTY bell so that it does not play over the configured sound.
 
 ```bash
-# Available presets: "bell" (Ubuntu Yaru ding), "pop" (instant message), "click" (dry wood tap)
-export AGENT_ALARM_SOUND="bell"  # Optional override
+# Available presets: "new" / "universfield" (default), "bell" (Ubuntu Yaru ding), "pop" (instant message), "click" (dry wood tap)
+export AGENT_ALARM_SOUND="new"  # Optional override
 
 # Volume level (e.g., 0.5 to 1.5)
 export AGENT_ALARM_VOLUME="1.0"
@@ -215,18 +214,24 @@ export AGENT_ALARM_MAX_AUDIO="180"
 
 ---
 
-## Testing
+## Testing & Quality Gates
 
-To verify the daemon without waiting for an agent run:
+Run the comprehensive test suite and automated quality gates:
 
 ```bash
-# Run self-test diagnostics:
+# Run full test suite (Unit + Regression + Integration):
+./scripts/run-tests.sh
+
+# Run strict 5-tier Quality Gate verification:
+./scripts/quality-gate.sh
+
+# Run live self-test diagnostics:
 agent-dock-bell --test
 
 # Trigger a forced alert (switch to another window to see it loop and stop on return):
 agent-dock-bell --force "Test Run"
 
-# Instantly stop any active alarm daemon and clear dock badges:
+# Instantly stop any active alarm daemon, brokers, and clear dock badges:
 agent-dock-bell --stop
 ```
 

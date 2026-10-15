@@ -36,6 +36,7 @@ transcripts/
 !README.md
 !CHANGELOG.md
 !CONTRIBUTING.md
+!RULES.md
 
 # ------------------------------------------------------------------------------
 # Python & Runtime Artifacts
@@ -52,6 +53,8 @@ env/
 venv/
 ENV/
 .pytest_cache/
+.coverage
+htmlcov/
 uv.lock
 
 # ------------------------------------------------------------------------------

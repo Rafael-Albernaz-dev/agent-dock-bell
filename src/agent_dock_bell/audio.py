@@ -9,28 +9,55 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+BUNDLED_NEW_SOUND = str(ASSETS_DIR / "universfield-new-notification-02-323592.mp3")
+USER_NEW_SOUND = str(Path.home() / ".local/share/sounds/universfield-new-notification-02-323592.mp3")
+MEDIA_NEW_SOUND = "/media/toru/96A10007A0FFEB9D/Audios/universfield-new-notification-02-323592.mp3"
+DOWNLOADS_NEW_SOUND = str(Path.home() / "Downloads/universfield-new-notification-02-323592.mp3")
+
+DEFAULT_SOUND = BUNDLED_NEW_SOUND
+
 PRESET_SOUNDS = {
+    "new": BUNDLED_NEW_SOUND,
+    "universfield": BUNDLED_NEW_SOUND,
     "bell": "/usr/share/sounds/Yaru/stereo/bell.oga",                  # Subtle Ubuntu ding (0.28s)
     "pop": "/usr/share/sounds/Yaru/stereo/message-new-instant.oga",    # Clean message bubble pop (0.42s)
     "click": str(Path.home() / ".local/share/sounds/click-dry.ogg"),  # Dry acoustic wood tap (0.38s)
     "complete": "/usr/share/sounds/freedesktop/stereo/complete.oga",   # Classic freedesktop chime
 }
 
-DEFAULT_SOUND = str(Path.home() / "Downloads/universfield-new-notification-02-323592.mp3")
-
 def resolve_sound_file(sound_choice: Optional[str] = None) -> str:
-    """Resolve sound file path from choice or environment variable."""
+    """Resolve sound file path from choice, environment variable, or default sound."""
     if not sound_choice:
-        sound_choice = os.environ.get("AGENT_ALARM_SOUND", DEFAULT_SOUND).strip()
+        sound_choice = os.environ.get("AGENT_ALARM_SOUND", "").strip()
 
-    if sound_choice in PRESET_SOUNDS and os.path.exists(PRESET_SOUNDS[sound_choice]):
-        return PRESET_SOUNDS[sound_choice]
-    elif os.path.isfile(sound_choice):
+    # 1. Preset choice
+    if sound_choice and sound_choice.lower() in PRESET_SOUNDS:
+        preset_path = PRESET_SOUNDS[sound_choice.lower()]
+        if os.path.exists(preset_path):
+            return preset_path
+
+    # 2. Explicit valid file path
+    if sound_choice and os.path.isfile(sound_choice):
         return sound_choice
-    elif os.path.exists(PRESET_SOUNDS["bell"]):
-        return PRESET_SOUNDS["bell"]
-    elif os.path.exists(PRESET_SOUNDS["complete"]):
-        return PRESET_SOUNDS["complete"]
+
+    # 3. Default configured sound (Universfield new notification chime)
+    # Search candidates in priority order: repo asset -> user local sound -> media mount -> downloads
+    for candidate in [
+        BUNDLED_NEW_SOUND,
+        USER_NEW_SOUND,
+        MEDIA_NEW_SOUND,
+        DOWNLOADS_NEW_SOUND,
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+
+    # 4. Fallback to system presets
+    for preset_key in ["bell", "complete", "pop", "click"]:
+        candidate = PRESET_SOUNDS.get(preset_key, "")
+        if candidate and os.path.exists(candidate):
+            return candidate
+
     return PRESET_SOUNDS.get("click", "")
 
 def get_sound_cmd(sound_file: str, volume: str = "1.0") -> List[str]:

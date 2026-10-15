@@ -166,6 +166,15 @@ def main() -> None:
             close_display()
         except Exception:
             pass
+        try:
+            import subprocess
+            subprocess.run(
+                ["pkill", "-u", str(os.getuid()), "-f", "agent_dock_bell.notification_broker"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
         print("Stopped active alarms.")
         sys.exit(0)
 

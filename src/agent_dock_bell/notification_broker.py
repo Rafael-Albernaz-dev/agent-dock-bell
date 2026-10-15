@@ -234,7 +234,11 @@ class NotificationBroker:
                 agent, 0, "org.gnome.Terminal", "Task Completed!",
                 "%s has finished executing." % agent,
                 ["default", "Open terminal"],
-                {"suppress-sound": self.GLib.Variant("b", True)}, 5000,
+                {
+                    "suppress-sound": self.GLib.Variant("b", True),
+                    "urgency": self.GLib.Variant("y", 1),
+                },
+                5000,
             ))
             result = self.bus.call_sync(
                 "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
@@ -301,25 +305,31 @@ def serve() -> None:
                          Gio.DBusSignalFlags.NONE, broker.on_owner_change, None)
 
     def on_client(source, condition):
+        client = None
         try:
             client, _ = server.accept()
-            with client:
-                client.settimeout(0.2)
-                credentials = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-                if int.from_bytes(credentials[4:8], sys.byteorder) != os.getuid():
-                    return True
-                request = bytearray()
-                while b"\n" not in request and len(request) <= MAX_REQUEST:
-                    chunk = client.recv(MAX_REQUEST + 1 - len(request))
-                    if not chunk:
-                        break
-                    request.extend(chunk)
-                if len(request) > MAX_REQUEST or not request.endswith(b"\n"):
-                    return True
-                payload = json.loads(request.decode("utf-8"))
-                client.sendall(b"ok\n" if broker.notify(payload) else b"error\n")
+            client.settimeout(0.2)
+            credentials = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            if int.from_bytes(credentials[4:8], sys.byteorder) != os.getuid():
+                return True
+            request = bytearray()
+            while b"\n" not in request and len(request) <= MAX_REQUEST:
+                chunk = client.recv(MAX_REQUEST + 1 - len(request))
+                if not chunk:
+                    break
+                request.extend(chunk)
+            if len(request) > MAX_REQUEST or not request.endswith(b"\n"):
+                return True
+            payload = json.loads(request.decode("utf-8"))
+            client.sendall(b"ok\n" if broker.notify(payload) else b"error\n")
         except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
             pass
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
         return True
 
     GLib.io_add_watch(server.fileno(), GLib.IO_IN, on_client)

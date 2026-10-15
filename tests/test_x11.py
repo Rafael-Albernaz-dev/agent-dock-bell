@@ -1,4 +1,3 @@
-import pytest
 import ctypes
 import sys
 import types

@@ -19,3 +19,16 @@ def test_get_sound_cmd_volume():
 
     cmd_custom = get_sound_cmd("/path/to/sound.oga", "0.7")
     assert cmd_custom == ["pw-play", "--volume", "0.7", "/path/to/sound.oga"]
+
+def test_resolve_default_sound_uses_new_audio():
+    import os
+    sound = resolve_sound_file()
+    assert "universfield-new-notification-02-323592.mp3" in sound
+    assert os.path.exists(sound)
+    assert os.path.getsize(sound) > 1000
+
+def test_resolve_sound_preset_new():
+    assert "new" in PRESET_SOUNDS
+    assert "universfield" in PRESET_SOUNDS
+    sound = resolve_sound_file("new")
+    assert "universfield-new-notification-02-323592.mp3" in sound
