@@ -131,7 +131,12 @@ def send_notification(agent_name: str, desktop_id: str, wait: bool = True,
         return None
     else:
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
         except Exception:
             pass
         return None

@@ -312,3 +312,139 @@ def test_is_terminal_focused_resolves_pid_from_xprop():
         assert is_terminal_focused(term_wids, {933148}, current_active_wid=0x1200004) is True
     assert 0x1200004 in term_wids
 
+def test_atspi_multi_window_terminal_checks_specific_tty_session():
+    """Verify that multi-window GNOME Terminal does not falsely report active when another window is focused."""
+    from agent_dock_bell.x11 import is_terminal_active_atspi
+
+    role = types.SimpleNamespace(FRAME=1, WINDOW=2, DIALOG=3, PAGE_TAB=4)
+    state = types.SimpleNamespace(ACTIVE=1, FOCUSED=2, SELECTED=3)
+
+    class Node:
+        def __init__(self, node_role, states):
+            self.node_role = node_role
+            self.states = set(states)
+
+        def get_role(self):
+            return self.node_role
+
+        def get_state_set(self):
+            return self
+
+        def contains(self, value):
+            return value in self.states
+
+    class App:
+        def __init__(self, pid, children):
+            self.pid = pid
+            self.children = children
+
+        def get_process_id(self):
+            return self.pid
+
+        def get_name(self):
+            return "gnome-terminal-server"
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    win0 = Node(role.FRAME, set())  # Unfocused window containing pts/1
+    win1 = Node(role.FRAME, {state.ACTIVE})  # Active window containing pts/2
+    tab0 = Node(role.PAGE_TAB, set())
+
+    term_app = App(10204, [win0, win1])
+    desktop = types.SimpleNamespace(
+        get_child_count=lambda: 1,
+        get_child_at_index=lambda idx: term_app,
+    )
+    atspi = types.SimpleNamespace(Role=role, StateType=state, init=lambda: None,
+                                  get_desktop=lambda idx: desktop)
+    gi = types.ModuleType("gi")
+    gi.require_version = lambda *args: None
+    repository = types.ModuleType("gi.repository")
+    repository.Atspi = atspi
+
+    def mock_find_frame(frames, tty, atspi_mod, return_tab=False):
+        if tty == "/dev/pts/1":
+            return (win0, tab0) if return_tab else win0
+        return None
+
+    with patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}), \
+         patch("agent_dock_bell.notification_broker._find_frame_for_tty", side_effect=mock_find_frame):
+        # Even though win1 is ACTIVE, session is on /dev/pts/1 (win0), so should return False
+        assert is_terminal_active_atspi({10204}, term_ttys={"/dev/pts/1"}) is False
+
+        # Once win0 becomes ACTIVE and tab0 is SELECTED, it should return True
+        win0.states.add(state.ACTIVE)
+        tab0.states.add(state.SELECTED)
+        assert is_terminal_active_atspi({10204}, term_ttys={"/dev/pts/1"}) is True
+
+def test_atspi_multi_tab_same_window_checks_tab_selected():
+    """Verify that if the terminal window is ACTIVE but user is on another tab, it is not active."""
+    from agent_dock_bell.x11 import is_terminal_active_atspi
+
+    role = types.SimpleNamespace(FRAME=1, WINDOW=2, DIALOG=3, PAGE_TAB=4)
+    state = types.SimpleNamespace(ACTIVE=1, FOCUSED=2, SELECTED=3)
+
+    class Node:
+        def __init__(self, node_role, states):
+            self.node_role = node_role
+            self.states = set(states)
+
+        def get_role(self):
+            return self.node_role
+
+        def get_state_set(self):
+            return self
+
+        def contains(self, value):
+            return value in self.states
+
+    class App:
+        def __init__(self, pid, children):
+            self.pid = pid
+            self.children = children
+
+        def get_process_id(self):
+            return self.pid
+
+        def get_name(self):
+            return "gnome-terminal-server"
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    win0 = Node(role.FRAME, {state.ACTIVE})  # Window is active
+    tab0 = Node(role.PAGE_TAB, set())  # But pts/1 tab is NOT selected (user on tab2)
+
+    term_app = App(10204, [win0])
+    desktop = types.SimpleNamespace(
+        get_child_count=lambda: 1,
+        get_child_at_index=lambda idx: term_app,
+    )
+    atspi = types.SimpleNamespace(Role=role, StateType=state, init=lambda: None,
+                                  get_desktop=lambda idx: desktop)
+    gi = types.ModuleType("gi")
+    gi.require_version = lambda *args: None
+    repository = types.ModuleType("gi.repository")
+    repository.Atspi = atspi
+
+    def mock_find_frame(frames, tty, atspi_mod, return_tab=False):
+        if tty == "/dev/pts/1":
+            return (win0, tab0) if return_tab else win0
+        return None
+
+    with patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}), \
+         patch("agent_dock_bell.notification_broker._find_frame_for_tty", side_effect=mock_find_frame):
+        # Window is active, but tab0 is not selected -> False
+        assert is_terminal_active_atspi({10204}, term_ttys={"/dev/pts/1"}) is False
+
+        # Once tab0 is SELECTED -> True
+        tab0.states.add(state.SELECTED)
+        assert is_terminal_active_atspi({10204}, term_ttys={"/dev/pts/1"}) is True
+

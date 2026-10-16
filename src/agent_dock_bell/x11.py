@@ -247,11 +247,15 @@ def get_ancestor_ttys(ancestor_pids: Set[int]) -> Set[str]:
             pass
     return ttys
 
-def is_terminal_active_atspi(term_pids: Set[int]) -> bool:
+_TTY_TARGET_CACHE: dict = {}
+
+def is_terminal_active_atspi(term_pids: Set[int], term_ttys: Optional[Set[str]] = None) -> bool:
     """
     Query AT-SPI to check if any terminal window currently has active focus on Wayland or X11.
     Strictly filters by term_pids to minimize D-Bus traffic, prevent cross-app lag, and avoid
     false positive focus triggers from Chromium/Electron background frames.
+    When term_ttys is provided, matches the exact frame/tab to prevent false-positive focus
+    in multi-window or multi-tab terminal environments (e.g. GNOME Terminal).
     """
     if not term_pids:
         return False
@@ -274,6 +278,7 @@ def is_terminal_active_atspi(term_pids: Set[int]) -> bool:
                 if pid not in term_pids:
                     continue
 
+                frames = []
                 win_count = app.get_child_count()
                 for j in range(win_count):
                     try:
@@ -286,15 +291,84 @@ def is_terminal_active_atspi(term_pids: Set[int]) -> bool:
                         role = win.get_role()
                         if role not in (Atspi.Role.FRAME, Atspi.Role.WINDOW, Atspi.Role.DIALOG):
                             continue
-
-                        state_set = win.get_state_set()
-                        if (
-                            state_set.contains(Atspi.StateType.ACTIVE)
-                            or state_set.contains(Atspi.StateType.FOCUSED)
-                        ):
-                            return True
+                        frames.append(win)
                     except Exception:
                         continue
+
+                if not frames:
+                    continue
+
+                any_frame_active = any(
+                    w.get_state_set().contains(Atspi.StateType.ACTIVE)
+                    or w.get_state_set().contains(Atspi.StateType.FOCUSED)
+                    for w in frames
+                )
+                if not any_frame_active:
+                    continue
+
+                pts_ttys = [
+                    t for t in (term_ttys or set())
+                    if isinstance(t, str) and re.fullmatch(r"/dev/pts/[0-9]+", t)
+                ]
+                if pts_ttys:
+                    try:
+                        from .notification_broker import _find_frame_for_tty
+                        matched_any = False
+                        for tty in pts_ttys:
+                            cache_key = (pid, tty)
+                            res = _TTY_TARGET_CACHE.get(cache_key)
+                            if not res or res[0] not in frames:
+                                res = _find_frame_for_tty(frames, tty, Atspi, return_tab=True)
+                                if res:
+                                    _TTY_TARGET_CACHE[cache_key] = res
+                            if res:
+                                matched_any = True
+                                frame, tab = res
+                                f_active = (
+                                    frame.get_state_set().contains(Atspi.StateType.ACTIVE)
+                                    or frame.get_state_set().contains(Atspi.StateType.FOCUSED)
+                                )
+                                t_selected = (
+                                    tab.get_state_set().contains(Atspi.StateType.SELECTED)
+                                    if tab is not frame else True
+                                )
+                                if f_active and t_selected:
+                                    return True
+                        if matched_any:
+                            return False
+                    except Exception:
+                        pass
+
+                # Fallback when no TTY matched:
+                for win in frames:
+                    state_set = win.get_state_set()
+                    if (
+                        state_set.contains(Atspi.StateType.ACTIVE)
+                        or state_set.contains(Atspi.StateType.FOCUSED)
+                    ):
+                        if len(frames) == 1:
+                            return True
+
+                        # In multi-window apps without TTY matching, check if any terminal widget has FOCUSED
+                        def has_focused_terminal(node, depth=0):
+                            if depth > 8:
+                                return False
+                            try:
+                                if (
+                                    node.get_role() == Atspi.Role.TERMINAL
+                                    and node.get_state_set().contains(Atspi.StateType.FOCUSED)
+                                ):
+                                    return True
+                                for k in range(node.get_child_count()):
+                                    ch = node.get_child_at_index(k)
+                                    if ch and has_focused_terminal(ch, depth + 1):
+                                        return True
+                            except Exception:
+                                pass
+                            return False
+
+                        if has_focused_terminal(win):
+                            return True
             except Exception:
                 continue
     except Exception:
@@ -305,6 +379,7 @@ def is_terminal_focused(
     term_wids: Set[int],
     term_pids: Set[int],
     current_active_wid: Optional[int] = None,
+    term_ttys: Optional[Set[str]] = None,
 ) -> bool:
     """
     Determine if terminal window is currently focused via X11 active window or Wayland AT-SPI.
@@ -327,7 +402,7 @@ def is_terminal_focused(
                         return True
         except Exception:
             pass
-    return is_terminal_active_atspi(term_pids)
+    return is_terminal_active_atspi(term_pids, term_ttys=term_ttys)
 
 def find_terminal_windows(ancestor_pids: Set[int]) -> Tuple[Set[int], Set[int], str]:
     """

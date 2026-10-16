@@ -75,11 +75,21 @@ def play_single_sound(sound_file: str, volume: str = "1.0", background: bool = F
     cmd = get_sound_cmd(sound_file, volume)
     if background:
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
             return
         except Exception:
             try:
-                subprocess.Popen(["canberra-gtk-play", "-f", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(
+                    ["canberra-gtk-play", "-f", sound_file],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
                 return
             except Exception:
                 return

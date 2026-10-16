@@ -68,15 +68,16 @@ flowchart TD
 ### Engineering Highlights
 * **Detached Hook Return**: Returns `{}` immediately after starting the detached daemon. Skipped intermediate events exit in ~40 ms, avoiding agent execution timeouts.
 * **Hybrid Wayland & X11 Focus Detection**: Combines event-driven AT-SPI (`gi.repository.Atspi`) with `GLib.MainLoop` and X11/XWayland active window tracking (`_NET_ACTIVE_WINDOW`), ensuring reliable detection across both native Wayland and XWayland environments.
+* **Per-Window & Per-Tab TTY Focus Precision**: In multi-window and multi-tab terminals managed by a single server process (such as `gnome-terminal-server`), maps the caller's exact slave PTS (`/dev/pts/N`) to its specific AT-SPI frame and tab (`ACTIVE` + `SELECTED`), with an in-memory `(pid, tty)` cache and inactive-window short-circuit (~2–13 ms) so background tabs/windows still trigger alarms when you are typing in another terminal window.
 * **Universal Electron & Modern App Support**: Correctly handles container window states (`ACTIVE` and `FOCUSED`) across Electron-based tools (ChatGPT Desktop, Codex, VS Code, Cursor, Windsurf) and modern terminal emulators (Ghostty, Alacritty, Kitty, Ptyxis, Warp, Tilix, Foot, WezTerm).
 * **Instant Startup Check**: Verifies whether the target window already gained focus while the daemon process was forking (~50 ms), completely eliminating false-alarm audio loops.
 * **Zero UI Lag / AT-SPI Scoping**: AT-SPI tree inspection is strictly filtered by target process IDs (`term_pids`), eliminating D-Bus accessibility queries to unrelated applications and preventing UI frame drops.
 * **Instant Alarm Control CLI (`--stop`)**: Built-in `agent-dock-bell --stop` (or `-k`) command to immediately silence any active background alarm and clear dock urgency badges.
 * **Comprehensive System Diagnostics (`--test`)**: Reports environment variables, audio player availability, D-Bus session status, active window ID, and AT-SPI accessibility health.
 * **Atomic Kernel Locking**: Daemon exclusivity is managed via `fcntl.flock(LOCK_EX | LOCK_NB)` on the PID file, ensuring race-free concurrency and automatic lock cleanup.
-* **Isolated Audio Process Management**: `AudioLoopWorker` tracks and terminates strictly its own playback process, avoiding session-wide `pkill` sweeps.
+* **Isolated Audio & Notification Sessions**: `AudioLoopWorker` tracks and terminates strictly its own playback process, while one-shot background audio (`pw-play` / `canberra-gtk-play`) and `notify-send` calls spawn in isolated sessions (`start_new_session=True`) so they survive immediate hook exit.
 * **Non-fatal Xlib Error Handling**: Installs a safe `XSetErrorHandler` in ctypes libX11 bindings to suppress asynchronous `BadWindow` crashes when windows close dynamically.
-* **Process Tree Resolution**: Traverses `/proc/<pid>/status` to resolve parent terminal emulator processes across tabbed and multi-process trees.
+* **Process Tree & Ancestor TTY Resolution**: Traverses `/proc/<pid>/status` and `/proc/<pid>/fd` strictly along the caller's ancestor chain to resolve parent terminal processes and exact slave TTYs without cross-window pollution.
 * **GNOME Terminal Notification Click**: A session broker keeps the click action available after the hook and alarm daemon exit. When several terminal windows exist, it identifies the source window from its TTY and focuses that window without switching tabs. If the source cannot be identified, the usual notification is shown.
 * **Resilient Audio Loop**: Wraps PipeWire (`pw-play`) and Canberra (`canberra-gtk-play`) playback with timeout watchers to prevent device sink hangs.
 
@@ -116,7 +117,7 @@ agent-dock-bell/
 ### Running Test Suite & Quality Gates
 
 ```bash
-# Run full test suite (70 tests: Unit + Regression + Integration):
+# Run full test suite (73 tests: Unit + Regression + Integration):
 ./scripts/run-tests.sh
 
 # Run strict 5-tier Quality Gate verification:

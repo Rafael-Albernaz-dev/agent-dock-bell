@@ -272,7 +272,9 @@ def main() -> None:
 
     ancestors = get_ancestor_pids()
     term_wids, term_pids, desktop_id = find_terminal_windows(ancestors)
-    term_ttys = get_ancestor_ttys(ancestors | term_pids)
+    term_ttys = get_ancestor_ttys(ancestors)
+    if not term_ttys and term_pids:
+        term_ttys = get_ancestor_ttys(term_pids)
 
     # The TTY bell is audible in GNOME Terminal and would play the old chime
     # alongside the configured sound. Dock urgency still requests attention.
@@ -282,7 +284,9 @@ def main() -> None:
     current_active = get_active_window_id()
     current_active_int = to_int(current_active)
 
-    is_already_active = is_terminal_focused(term_wids, term_pids, current_active_int)
+    is_already_active = is_terminal_focused(
+        term_wids, term_pids, current_active_int, term_ttys=term_ttys
+    )
 
     sound_file = resolve_sound_file()
     volume = os.environ.get("AGENT_ALARM_VOLUME", "1.0").strip()

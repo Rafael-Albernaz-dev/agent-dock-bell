@@ -179,7 +179,7 @@ def run_daemon(
 
     try:
         # Check if terminal/window is ALREADY active right now before doing anything
-        if is_terminal_focused(term_wids, term_pids, to_int(get_active_window_id())):
+        if is_terminal_focused(term_wids, term_pids, to_int(get_active_window_id()), term_ttys=term_ttys):
             sys.exit(0)
             return
 
@@ -314,14 +314,14 @@ def run_daemon(
             # Check B: Event-driven AT-SPI window focus (Wayland & X11)
             if atspi_triggered.is_set():
                 atspi_triggered.clear()
-                if is_terminal_active_atspi(term_pids):
+                if is_terminal_active_atspi(term_pids, term_ttys=term_ttys):
                     break
 
             # Check C: Fast AT-SPI polling fallback (every 0.5s, targeted strictly at term_pids)
             now = time.monotonic()
             if now - last_atspi_poll >= 0.5:
                 last_atspi_poll = now
-                if term_pids and is_terminal_active_atspi(term_pids):
+                if term_pids and is_terminal_active_atspi(term_pids, term_ttys=term_ttys):
                     break
 
             # Check D: TTY interaction (user pressed any key or entered input)

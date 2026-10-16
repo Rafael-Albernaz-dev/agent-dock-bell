@@ -241,3 +241,25 @@ def test_already_active_kills_lingering_daemon():
     kill_existing.assert_called_once()
     spawn.assert_not_called()
 
+def test_cli_passes_ancestor_ttys_to_is_terminal_focused():
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "Test Agent"]), \
+         patch("agent_dock_bell.cli.read_hook_stdin", return_value=("", None)), \
+         patch("agent_dock_bell.x11.get_ancestor_pids", return_value={123}), \
+         patch("agent_dock_bell.x11.find_terminal_windows", return_value=({456}, {1000}, "org.gnome.Terminal.desktop")), \
+         patch("agent_dock_bell.x11.get_ancestor_ttys", return_value={"/dev/pts/3"}) as mock_ttys, \
+         patch("agent_dock_bell.x11.get_active_window_id", return_value="0x0"), \
+         patch("agent_dock_bell.x11.is_terminal_focused", return_value=False) as mock_focused, \
+         patch("agent_dock_bell.audio.resolve_sound_file", return_value="bell"), \
+         patch("agent_dock_bell.daemon.PIDLock.kill_existing"), \
+         patch("subprocess.Popen") as spawn:
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    # Must inspect ancestors ({123}) without polluting with server PID ({1000})
+    mock_ttys.assert_called_with({123})
+    # is_terminal_focused must be called with term_ttys
+    assert mock_focused.call_args.kwargs["term_ttys"] == {"/dev/pts/3"}
+

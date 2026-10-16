@@ -108,7 +108,7 @@ def _find_showing_terminal(node, Atspi, budget) -> object:
     return None
 
 
-def _find_frame_for_tty(frames, tty: str, Atspi):
+def _find_frame_for_tty(frames, tty: str, Atspi, return_tab: bool = False):
     if not isinstance(tty, str) or not re.fullmatch(r"/dev/pts/[0-9]+", tty):
         return None
     tabs = []
@@ -126,6 +126,12 @@ def _find_frame_for_tty(frames, tty: str, Atspi):
                         stack.append((node.get_child_at_index(index), depth + 1))
             except Exception:
                 continue
+    if not tabs:
+        for frame in frames:
+            try:
+                tabs.append((frame, frame, frame.get_name()))
+            except Exception:
+                pass
     if not tabs:
         return None
 
@@ -145,7 +151,7 @@ def _find_frame_for_tty(frames, tty: str, Atspi):
                         if marker in tab.get_name():
                             safe_title = re.sub(r"[\x00-\x1f\x7f]", "", original)
                             os.write(fd, ("\x1b]0;%s\x07" % safe_title).encode("utf-8"))
-                            return frame
+                            return (frame, tab) if return_tab else frame
                     except Exception:
                         continue
                 time.sleep(0.01)
