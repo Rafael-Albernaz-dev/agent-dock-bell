@@ -313,15 +313,16 @@ def run_daemon(
 
             # Check B: Event-driven AT-SPI window focus (Wayland & X11)
             if atspi_triggered.is_set():
-                atspi_triggered.clear()
-                if is_terminal_active_atspi(term_pids, term_ttys=term_ttys):
-                    break
+                break
 
             # Check C: Fast AT-SPI polling fallback (every 0.5s, targeted strictly at term_pids)
             now = time.monotonic()
             if now - last_atspi_poll >= 0.5:
                 last_atspi_poll = now
-                if term_pids and is_terminal_active_atspi(term_pids, term_ttys=term_ttys):
+                if term_pids and (
+                    is_terminal_active_atspi(term_pids, term_ttys=term_ttys)
+                    or is_terminal_active_atspi(term_pids)
+                ):
                     break
 
             # Check D: TTY interaction (user pressed any key or entered input)

@@ -139,3 +139,16 @@ def test_set_dock_badge_reuses_gio_connection():
         fallback.assert_not_called()
     finally:
         dock._session_bus = old_bus
+
+
+def test_send_notification_replaces_existing_id(tmp_path):
+    from unittest.mock import mock_open
+    with patch("builtins.open", mock_open(read_data="99")), \
+         patch("subprocess.check_output", return_value=b"99\n") as mock_run:
+        nid = send_notification("Hermes", "org.gnome.Terminal.desktop")
+        assert nid == 99
+        cmd = mock_run.call_args[0][0]
+        assert "-r" in cmd
+        assert "99" in cmd
+        assert "string:x-canonical-private-synchronous:Hermes" in cmd
+

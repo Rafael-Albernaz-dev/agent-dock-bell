@@ -139,18 +139,24 @@ def _find_frame_for_tty(frames, tty: str, Atspi, return_tab: bool = False):
         fd = os.open(tty, os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_NOFOLLOW)
     except OSError:
         return None
+    marker_written = False
     try:
         if not stat.S_ISCHR(os.fstat(fd).st_mode):
             return None
         marker = "agent-dock-bell-" + uuid.uuid4().hex
         for _ in range(4):
             os.write(fd, ("\x1b]0;%s\x07" % marker).encode("ascii"))
+            marker_written = True
             for _ in range(5):
                 for frame, tab, original in tabs:
                     try:
-                        if marker in tab.get_name():
-                            safe_title = re.sub(r"[\x00-\x1f\x7f]", "", original)
+                        tab_name = tab.get_name() or ""
+                        frame_name = frame.get_name() or ""
+                        if marker in tab_name or marker in frame_name:
+                            safe_title = original if original and not original.startswith("agent-dock-bell-") else "Terminal"
+                            safe_title = re.sub(r"[\x00-\x1f\x7f]", "", safe_title)
                             os.write(fd, ("\x1b]0;%s\x07" % safe_title).encode("utf-8"))
+                            marker_written = False
                             return (frame, tab) if return_tab else frame
                     except Exception:
                         continue
@@ -158,6 +164,16 @@ def _find_frame_for_tty(frames, tty: str, Atspi, return_tab: bool = False):
     except OSError:
         pass
     finally:
+        if marker_written:
+            try:
+                default_title = "Terminal"
+                for _, _, orig in tabs:
+                    if orig and not orig.startswith("agent-dock-bell-"):
+                        default_title = re.sub(r"[\x00-\x1f\x7f]", "", orig)
+                        break
+                os.write(fd, ("\x1b]0;%s\x07" % default_title).encode("utf-8"))
+            except Exception:
+                pass
         os.close(fd)
     return None
 
@@ -209,6 +225,8 @@ class NotificationBroker:
         self.GLib = GLib
         self.pending = OrderedDict()
         self.owners = set()
+        self.last_nids = {}
+        self.last_notify_time = {}
         self._refresh_owners()
 
     def _refresh_owners(self):
@@ -234,10 +252,26 @@ class NotificationBroker:
             return False
         if not isinstance(target.get("pid"), int) or _process_start_time(target["pid"]) != target.get("started"):
             return False
+
+        # If target terminal is ALREADY focused/active, suppress notification banner
+        try:
+            from .x11 import is_terminal_active_atspi
+            pid = target.get("pid")
+            tty = target.get("tty")
+            if pid and is_terminal_active_atspi({pid}, term_ttys={tty} if tty else None):
+                return True
+        except Exception:
+            pass
+
+        now = time.monotonic()
+        if now - self.last_notify_time.get(agent, 0.0) < 1.5:
+            return True
+
         self._expire()
         try:
+            replaces_id = int(self.last_nids.get(agent, 0))
             params = self.GLib.Variant("(susssasa{sv}i)", (
-                agent, 0, "org.gnome.Terminal", "Task Completed!",
+                agent, replaces_id, "org.gnome.Terminal", "Task Completed!",
                 "%s has finished executing." % agent,
                 ["default", "Open terminal"],
                 {
@@ -254,7 +288,11 @@ class NotificationBroker:
             nid = result.unpack()[0]
             if not isinstance(nid, int) or nid <= 0:
                 return False
-            self.pending[nid] = (target, time.monotonic())
+            if replaces_id and replaces_id != nid:
+                self.pending.pop(replaces_id, None)
+            self.last_nids[agent] = nid
+            self.last_notify_time[agent] = now
+            self.pending[nid] = (target, now)
             while len(self.pending) > MAX_PENDING:
                 self.pending.popitem(last=False)
             return True
@@ -271,17 +309,53 @@ class NotificationBroker:
         if sender not in self.owners:
             return
         if signal == "NotificationClosed":
-            self.pending.pop(params.unpack()[0], None)
+            try:
+                unpacked = params.unpack()
+                nid = unpacked[0]
+                reason = unpacked[1] if len(unpacked) > 1 else None
+            except Exception:
+                nid, reason = None, None
+            if nid:
+                self.pending.pop(nid, None)
+                for agent_key, last_id in list(self.last_nids.items()):
+                    if last_id == nid:
+                        self.last_nids.pop(agent_key, None)
+            if reason == 2:  # Dismissed by user
+                try:
+                    from .daemon import PIDLock
+                    PIDLock.kill_existing()
+                except Exception:
+                    pass
+                try:
+                    from .dock import set_dock_badge
+                    set_dock_badge("org.gnome.Terminal.desktop", 0, urgent=False)
+                except Exception:
+                    pass
         elif signal == "ActionInvoked":
             nid, action = params.unpack()
             item = self.pending.pop(nid, None)
+            for agent_key, last_id in list(self.last_nids.items()):
+                if last_id == nid:
+                    self.last_nids.pop(agent_key, None)
             if action == "default" and item and time.monotonic() - item[1] <= PENDING_SECONDS:
                 focus_gnome_terminal(item[0])
+                try:
+                    from .daemon import PIDLock
+                    PIDLock.kill_existing()
+                except Exception:
+                    pass
+                try:
+                    from .dock import set_dock_badge
+                    set_dock_badge("org.gnome.Terminal.desktop", 0, urgent=False)
+                except Exception:
+                    pass
 
     def on_owner_change(self, connection, sender, path, interface, signal, params, user_data):
         name, old_owner, new_owner = params.unpack()
         if name in ("org.freedesktop.Notifications", "org.gnome.Shell"):
             self.pending.clear()
+            self.last_nids.clear()
+            self.last_notify_time.clear()
             self._refresh_owners()
 
 

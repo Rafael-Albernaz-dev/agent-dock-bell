@@ -1,5 +1,6 @@
 import sys
 import stat
+import time
 from types import ModuleType
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -167,3 +168,144 @@ def test_focus_skips_hidden_widget_and_uses_visible_terminal():
     locate.assert_called_once()
     visible.grab_focus.assert_called_once_with()
     wrong.grab_focus.assert_not_called()
+
+
+def test_action_invoked_dismisses_alarm_and_clears_badge():
+    from agent_dock_bell.notification_broker import NotificationBroker
+    bus = Mock()
+    Gio = Mock()
+    GLib = Mock()
+    broker = NotificationBroker(bus, Gio, GLib)
+    broker.owners = {":1.50"}
+    target = {"pid": 123, "started": "800", "tty": "/dev/pts/7"}
+    broker.pending[10] = (target, time.monotonic())
+
+    with patch("agent_dock_bell.notification_broker.focus_gnome_terminal") as mock_focus, \
+         patch("agent_dock_bell.daemon.PIDLock.kill_existing") as mock_kill, \
+         patch("agent_dock_bell.dock.set_dock_badge") as mock_badge:
+        params = Mock()
+        params.unpack.return_value = (10, "default")
+        broker.on_signal(bus, ":1.50", "/org/freedesktop/Notifications",
+                         "org.freedesktop.Notifications", "ActionInvoked", params, None)
+
+        mock_focus.assert_called_once_with(target)
+        mock_kill.assert_called_once()
+        mock_badge.assert_called_once_with("org.gnome.Terminal.desktop", 0, urgent=False)
+        assert 10 not in broker.pending
+
+
+def test_notification_closed_user_dismiss_kills_daemon_and_clears_badge():
+    from agent_dock_bell.notification_broker import NotificationBroker
+    bus = Mock()
+    Gio = Mock()
+    GLib = Mock()
+    broker = NotificationBroker(bus, Gio, GLib)
+    broker.owners = {":1.50"}
+    target = {"pid": 123, "started": "800", "tty": "/dev/pts/7"}
+    broker.pending[10] = (target, time.monotonic())
+
+    with patch("agent_dock_bell.daemon.PIDLock.kill_existing") as mock_kill, \
+         patch("agent_dock_bell.dock.set_dock_badge") as mock_badge:
+        params = Mock()
+        params.unpack.return_value = (10, 2)  # reason 2 = dismissed by user
+        broker.on_signal(bus, ":1.50", "/org/freedesktop/Notifications",
+                         "org.freedesktop.Notifications", "NotificationClosed", params, None)
+
+        mock_kill.assert_called_once()
+        mock_badge.assert_called_once_with("org.gnome.Terminal.desktop", 0, urgent=False)
+        assert 10 not in broker.pending
+
+
+def test_tty_marker_always_restores_title_on_failure():
+    from agent_dock_bell.notification_broker import _find_frame_for_tty
+    class Node:
+        def __init__(self, name):
+            self.name = name
+        def get_role(self):
+            return 1
+        def get_name(self):
+            return self.name
+        def get_child_count(self):
+            return 0
+        def get_child_at_index(self, idx):
+            return None
+
+    frame = Node("MyWindow")
+    writes = []
+    def fake_write(fd, data):
+        writes.append(data)
+        return len(data)
+
+    atspi = SimpleNamespace(Role=SimpleNamespace(PAGE_TAB=1))
+    with patch("agent_dock_bell.notification_broker.os.open", return_value=7), \
+         patch("agent_dock_bell.notification_broker.os.fstat", return_value=SimpleNamespace(st_mode=stat.S_IFCHR)), \
+         patch("agent_dock_bell.notification_broker.os.write", side_effect=fake_write), \
+         patch("agent_dock_bell.notification_broker.os.close"), \
+         patch("agent_dock_bell.notification_broker.time.sleep"):
+        res = _find_frame_for_tty([frame], "/dev/pts/9", atspi)
+        assert res is None
+
+    # Verify that marker was written, and the final write restored a clean title ("MyWindow")
+    assert len(writes) >= 2
+    assert b"agent-dock-bell-" in writes[0]
+    assert b"MyWindow" in writes[-1]
+
+
+def test_broker_reuses_replaces_id_for_same_agent():
+    bus = Bus()
+    gio = SimpleNamespace(DBusCallFlags=SimpleNamespace(NONE=0))
+    glib = SimpleNamespace(Variant=Variant, VariantType=lambda sig: sig)
+    broker = NotificationBroker(bus, gio, glib)
+
+    with patch("agent_dock_bell.notification_broker._process_start_time", return_value="800"), \
+         patch("agent_dock_bell.x11.is_terminal_active_atspi", return_value=False):
+        # Call 1
+        assert broker.notify({"agent": "Hermes", "target": {"pid": 123, "started": "800"}})
+        notify_calls = [call for call in bus.calls if call[1] == "Notify"]
+        assert len(notify_calls) == 1
+        call1_params = notify_calls[0][2].unpack()
+        assert call1_params[1] == 0  # First call has replaces_id = 0
+
+        # Advance monotonic clock by 2s so debounce does not filter it
+        with patch("time.monotonic", return_value=time.monotonic() + 2.0):
+            assert broker.notify({"agent": "Hermes", "target": {"pid": 123, "started": "800"}})
+            notify_calls2 = [call for call in bus.calls if call[1] == "Notify"]
+            assert len(notify_calls2) == 2
+            call2_params = notify_calls2[1][2].unpack()
+            assert call2_params[1] == 77  # Second call replaces previous ID (77)!
+
+
+def test_broker_debounces_rapid_notifications():
+    bus = Bus()
+    gio = SimpleNamespace(DBusCallFlags=SimpleNamespace(NONE=0))
+    glib = SimpleNamespace(Variant=Variant, VariantType=lambda sig: sig)
+    broker = NotificationBroker(bus, gio, glib)
+
+    with patch("agent_dock_bell.notification_broker._process_start_time", return_value="800"), \
+         patch("agent_dock_bell.x11.is_terminal_active_atspi", return_value=False):
+        # Call 1 fires Notify
+        assert broker.notify({"agent": "Hermes", "target": {"pid": 123, "started": "800"}})
+        notify_calls = [call for call in bus.calls if call[1] == "Notify"]
+        assert len(notify_calls) == 1
+
+        # Rapid consecutive call (0.2s later) succeeds without re-firing Notify on DBus
+        with patch("time.monotonic", return_value=time.monotonic() + 0.2):
+            assert broker.notify({"agent": "Hermes", "target": {"pid": 123, "started": "800"}})
+            notify_calls2 = [call for call in bus.calls if call[1] == "Notify"]
+            assert len(notify_calls2) == 1  # No duplicate DBus Notify call!
+
+
+def test_broker_suppresses_notification_when_terminal_active():
+    bus = Bus()
+    gio = SimpleNamespace(DBusCallFlags=SimpleNamespace(NONE=0))
+    glib = SimpleNamespace(Variant=Variant, VariantType=lambda sig: sig)
+    broker = NotificationBroker(bus, gio, glib)
+
+    with patch("agent_dock_bell.notification_broker._process_start_time", return_value="800"), \
+         patch("agent_dock_bell.x11.is_terminal_active_atspi", return_value=True):
+        # When terminal is active, notify returns True but suppresses DBus notification
+        assert broker.notify({"agent": "Hermes", "target": {"pid": 123, "started": "800"}})
+        notify_calls = [call for call in bus.calls if call[1] == "Notify"]
+        assert len(notify_calls) == 0
+
+

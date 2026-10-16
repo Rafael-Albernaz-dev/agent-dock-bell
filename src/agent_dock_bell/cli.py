@@ -31,12 +31,286 @@ def build_daemon_environment() -> Dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(python_paths)
     return env
 
+def is_chatgpt_environment(
+    args: Optional[List[str]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    raw_stdin: str = "",
+) -> bool:
+    """
+    Detect whether agent-dock-bell was invoked from or within ChatGPT Desktop App / ChatGPT UI.
+    ChatGPT UI already has its own completion sound and notifications, so agent-dock-bell
+    should never alert or fork daemons when running in this environment.
+    """
+    if args:
+        for arg in args:
+            if not arg.startswith("--") and "chatgpt" in arg.lower():
+                return True
+
+    chrome_desktop = os.environ.get("CHROME_DESKTOP", "").lower()
+    if "chatgpt" in chrome_desktop:
+        return True
+
+    gio_app = os.environ.get("GIO_LAUNCHED_DESKTOP_FILE", "").lower()
+    if "chatgpt" in gio_app:
+        return True
+
+    originator = os.environ.get("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "").lower()
+    if "chatgpt" in originator or originator == "codex desktop":
+        return True
+
+    cli_path = os.environ.get("CODEX_CLI_PATH", "").lower()
+    if "/usr/lib/chatgpt" in cli_path or "chatgpt" in cli_path:
+        return True
+
+    if "CODEX_APP_TOOLS_PIPE_PATH" in os.environ:
+        return True
+
+    if "BROWSER_USE_CODEX_APP_VERSION" in os.environ or "BROWSER_USE_CODEX_APP_BUILD_FLAVOR" in os.environ:
+        return True
+
+    for key in os.environ:
+        if key.startswith("CHATGPT_") or key == "CHATGPT_DESKTOP":
+            return True
+
+    if payload and isinstance(payload, dict):
+        orig = str(payload.get("originator") or payload.get("client") or payload.get("app") or "").lower()
+        if "chatgpt" in orig or orig == "codex desktop":
+            return True
+        extra = payload.get("extra")
+        if isinstance(extra, dict):
+            extra_orig = str(extra.get("originator") or extra.get("client") or extra.get("app") or "").lower()
+            if "chatgpt" in extra_orig or extra_orig == "codex desktop":
+                return True
+
+    if raw_stdin and ("chatgpt" in raw_stdin.lower() or "codex desktop" in raw_stdin.lower()):
+        return True
+
+    try:
+        from .x11 import get_ancestor_pids
+        ancestors = get_ancestor_pids()
+        for pid in ancestors:
+            comm = ""
+            comm_path = f"/proc/{pid}/comm"
+            if os.path.exists(comm_path):
+                with open(comm_path, "r", errors="ignore") as f:
+                    comm = f.read().strip().lower()
+            if "chatgpt" in comm:
+                return True
+            cmdline_path = f"/proc/{pid}/cmdline"
+            if os.path.exists(cmdline_path):
+                with open(cmdline_path, "rb") as f:
+                    cmdline = f.read().lower()
+                if b"/usr/lib/chatgpt" in cmdline or b"chatgpt" in cmdline:
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+def _identify_agent_family(comm: str, cmdline: bytes) -> Optional[str]:
+    comm_low = comm.lower().strip()
+    cmdline_low = cmdline.lower()
+
+    # Skip alarm scripts/wrappers so they are not treated as the AI agent itself
+    for wrapper in (b"agent-dock-bell", b"agent-alarm", b"codex-cli-alarm", b"agent_dock_bell"):
+        if wrapper in cmdline_low:
+            return None
+
+    # Check Hermes
+    if comm_low == "hermes" or comm_low.startswith("hermes"):
+        return "hermes"
+    if b"/hermes" in cmdline_low or b"hermes-agent" in cmdline_low or b"/.hermes/" in cmdline_low:
+        parts = cmdline_low.split(b"\0")
+        if parts:
+            first_part = parts[0]
+            second_part = parts[1] if len(parts) > 1 else b""
+            if b"hermes" in first_part or b"hermes" in second_part:
+                return "hermes"
+
+    # Check Codex
+    if comm_low == "codex" or comm_low.startswith("codex"):
+        return "codex"
+    if b"/codex" in cmdline_low or b"codex-exec" in cmdline_low:
+        parts = cmdline_low.split(b"\0")
+        if parts:
+            first_part = parts[0]
+            second_part = parts[1] if len(parts) > 1 else b""
+            if b"codex" in first_part or b"codex" in second_part:
+                return "codex"
+
+    # Check Antigravity / AGY
+    if comm_low in ("antigravity", "agy") or comm_low.startswith("antigravity"):
+        return "antigravity"
+    if b"/antigravity" in cmdline_low or b"/agy" in cmdline_low or b"antigravity-cli" in cmdline_low:
+        parts = cmdline_low.split(b"\0")
+        if parts:
+            first_part = parts[0]
+            second_part = parts[1] if len(parts) > 1 else b""
+            if b"antigravity" in first_part or b"agy" in first_part or b"antigravity" in second_part or b"agy" in second_part:
+                return "antigravity"
+
+    # Check ChatGPT
+    if comm_low == "chatgpt":
+        return "chatgpt"
+    if b"/usr/lib/chatgpt" in cmdline_low or b"chatgpt" in cmdline_low:
+        parts = cmdline_low.split(b"\0")
+        if parts and (b"chatgpt" in parts[0] or (len(parts) > 1 and b"chatgpt" in parts[1])):
+            return "chatgpt"
+
+    # Check Cursor / Windsurf / Aider / Claude
+    for name in ("cursor", "windsurf", "aider", "claude"):
+        name_b = name.encode("ascii")
+        if comm_low == name or comm_low.startswith(name):
+            return name
+        parts = cmdline_low.split(b"\0")
+        if parts and (name_b in parts[0] or (len(parts) > 1 and name_b in parts[1])):
+            return name
+
+    return None
+
+def is_nested_agent_execution(
+    args: Optional[List[str]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    raw_stdin: str = "",
+) -> bool:
+    """
+    Detect whether agent-dock-bell was invoked from a nested agent execution
+    (e.g., Codex CLI executed as a tool under Hermes or Antigravity, or child subagents).
+    Nested subordinate runs must never trigger completion alarms or fork daemons.
+    """
+    # 1. Environment markers
+    if os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT"):
+        return True
+    if "CODEX_APP_TOOLS_PIPE_PATH" in os.environ:
+        return True
+    if os.environ.get("ANTIGRAVITY_SUBAGENT") or os.environ.get("SUBAGENT_ID"):
+        return True
+
+    # 2. Payload markers
+    if payload and isinstance(payload, dict):
+        if payload.get("tool_name"):
+            return True
+        extra = payload.get("extra")
+        if isinstance(extra, dict):
+            if extra.get("tool_name"):
+                return True
+            task_id = str(extra.get("task_id") or "")
+            if task_id.startswith(("bg-", "subagent", "review-", "cron-", "heartbeat-", "task-sub-")):
+                return True
+            if extra.get("failed") is True:
+                return True
+            if extra.get("interrupted") is True:
+                return True
+            if extra.get("completed") is False:
+                return True
+            turn_exit_reason = extra.get("turn_exit_reason")
+            if turn_exit_reason:
+                r_low = str(turn_exit_reason).strip().lower()
+                if r_low.startswith((
+                    "guardrail", "halt", "budget", "exhaust", "interrupt",
+                    "error", "timeout", "max_iterations", "session_persistence",
+                    "local_processing", "repeated_outer"
+                )):
+                    return True
+                if not (
+                    r_low.startswith("text_response(")
+                    or r_low.startswith("partial_stream")
+                    or r_low.startswith("fallback_prior")
+                    or r_low in ("stop", "end_turn", "completed")
+                ):
+                    return True
+
+        task_id = str(payload.get("task_id") or "")
+        if task_id.startswith(("bg-", "subagent", "review-", "cron-", "heartbeat-", "task-sub-")):
+            return True
+
+        if payload.get("failed") is True:
+            return True
+        if payload.get("interrupted") is True:
+            return True
+        if payload.get("completed") is False:
+            return True
+
+        turn_exit_reason = payload.get("turn_exit_reason")
+        if turn_exit_reason:
+            r_low = str(turn_exit_reason).strip().lower()
+            if r_low.startswith((
+                "guardrail", "halt", "budget", "exhaust", "interrupt",
+                "error", "timeout", "max_iterations", "session_persistence",
+                "local_processing", "repeated_outer"
+            )):
+                return True
+            if not (
+                r_low.startswith("text_response(")
+                or r_low.startswith("partial_stream")
+                or r_low.startswith("fallback_prior")
+                or r_low in ("stop", "end_turn", "completed")
+            ):
+                return True
+
+        if (
+            payload.get("parent_session_id")
+            or payload.get("parentSessionId")
+            or payload.get("parent_id")
+            or payload.get("child_role")
+            or payload.get("is_subagent")
+            or payload.get("is_background")
+        ):
+            return True
+
+    # 3. Process Ancestry Hierarchy
+    try:
+        from .x11 import get_ancestor_process_chain
+        chain = get_ancestor_process_chain()
+    except Exception:
+        chain = []
+
+    if chain:
+        agent_nodes = []
+        for pid, comm, cmdline in chain:
+            fam = _identify_agent_family(comm, cmdline)
+            if fam:
+                agent_nodes.append((pid, fam))
+
+        if agent_nodes:
+            reporting_family = None
+            if args:
+                for arg in args:
+                    if not arg.startswith("--"):
+                        arg_low = arg.lower()
+                        for fam in ("hermes", "codex", "antigravity", "chatgpt", "cursor", "windsurf", "aider", "claude"):
+                            if fam in arg_low:
+                                reporting_family = fam
+                                break
+                        if reporting_family:
+                            break
+
+            if reporting_family:
+                for pid, fam in agent_nodes:
+                    if fam != reporting_family:
+                        return True
+                if len(agent_nodes) > 1:
+                    return True
+            else:
+                if len(agent_nodes) > 1:
+                    return True
+
+    return False
+
 def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: List[str]) -> bool:
     """Inspect stdin payload to skip test runs, subagents, or intermediate tool calls."""
     if "--force" in args:
         return False
 
     if "--test" in args or "--dry-run" in args:
+        return True
+
+    # ChatGPT UI has its own completion sounds and notifications; skip alerts entirely
+    if is_chatgpt_environment(args, payload, raw_stdin):
+        return True
+
+    # Nested agent execution (e.g. Codex running under Hermes, subagents, child tasks)
+    if is_nested_agent_execution(args, payload, raw_stdin):
         return True
 
     if raw_stdin:
@@ -75,12 +349,15 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
             return True
         completed = payload.get("completed")
         interrupted = payload.get("interrupted")
+        failed = payload.get("failed")
         extra = payload.get("extra")
         if isinstance(extra, dict):
             if "completed" in extra:
                 completed = extra.get("completed")
             if "interrupted" in extra:
                 interrupted = extra.get("interrupted")
+            if "failed" in extra:
+                failed = extra.get("failed")
             if (
                 extra.get("parent_session_id")
                 or extra.get("parentSessionId")
@@ -92,7 +369,7 @@ def should_skip_event(raw_stdin: str, payload: Optional[Dict[str, Any]], args: L
                 or extra.get("write_context") in ("background_review", "review")
             ):
                 return True
-        if completed is False or interrupted is True:
+        if completed is False or interrupted is True or failed is True:
             return True
 
         # 4. Codex CLI Stop Hook:
@@ -237,6 +514,14 @@ def main() -> None:
         if not term_wids and not term_pids:
             return
 
+        if not ("--force" in args) and (
+            desktop_id == "chatgpt.desktop"
+            or is_chatgpt_environment(args)
+            or is_nested_agent_execution(args)
+        ):
+            sys.exit(0)
+            return
+
         sound_file = resolve_sound_file()
         volume = os.environ.get("AGENT_ALARM_VOLUME", "1.0").strip()
         max_audio = int(os.environ.get("AGENT_ALARM_MAX_AUDIO", "180"))
@@ -256,7 +541,7 @@ def main() -> None:
 
     from .audio import play_single_sound, resolve_sound_file
     from .daemon import PIDLock
-    from .dock import send_notification, send_terminal_bell
+    from .dock import send_notification, send_terminal_bell, set_dock_badge
     import subprocess
     from .x11 import (
         find_terminal_windows, get_active_window_id, get_ancestor_pids,
@@ -275,6 +560,10 @@ def main() -> None:
     term_ttys = get_ancestor_ttys(ancestors)
     if not term_ttys and term_pids:
         term_ttys = get_ancestor_ttys(term_pids)
+
+    if desktop_id == "chatgpt.desktop" and not ("--force" in args):
+        print("{}")
+        sys.exit(0)
 
     # The TTY bell is audible in GNOME Terminal and would play the old chime
     # alongside the configured sound. Dock urgency still requests attention.
@@ -300,10 +589,11 @@ def main() -> None:
         sys.exit(0)
 
     if is_already_active and not ("--force" in args):
-        # User is already looking at the terminal window
+        # User is already looking at the terminal window: suppress visual notifications
         PIDLock.kill_existing()
         play_single_sound(sound_file, volume, background=True)
-        send_notification(agent_name, desktop_id, wait=False, term_pids=term_pids, term_ttys=term_ttys)
+        if os.environ.get("AGENT_ALARM_NOTIFY_ACTIVE", "0").strip() in ("1", "true", "yes"):
+            send_notification(agent_name, desktop_id, wait=False, term_pids=term_pids, term_ttys=term_ttys)
         print("{}")
         sys.exit(0)
 

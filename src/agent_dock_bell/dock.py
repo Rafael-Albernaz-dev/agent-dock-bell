@@ -93,6 +93,10 @@ def set_dock_badge(desktop_id: str, count: int, urgent: bool = True) -> None:
         except Exception:
             pass
 
+def _nid_path(agent_name: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", agent_name or "agent")
+    return f"/tmp/agent-dock-bell-nid-{os.getuid()}-{safe}"
+
 def send_notification(agent_name: str, desktop_id: str, wait: bool = True,
                       term_pids: Optional[Set[int]] = None,
                       term_ttys: Optional[Set[str]] = None) -> Optional[int]:
@@ -117,14 +121,34 @@ def send_notification(agent_name: str, desktop_id: str, wait: bool = True,
         "-a", agent_name,
         "-i", icon,
         "-h", "boolean:suppress-sound:true",
+        "-h", f"string:x-canonical-private-synchronous:{agent_name}",
+    ]
+    nid_file = _nid_path(agent_name)
+    replace_id = None
+    try:
+        with open(nid_file, "r") as f:
+            c = f.read().strip()
+            if c.isdigit():
+                replace_id = c
+    except OSError:
+        pass
+    if replace_id:
+        cmd.extend(["-r", replace_id])
+
+    cmd.extend([
         "Task Completed!",
         f"{agent_name} has finished executing.",
-    ]
+    ])
     if wait:
         cmd.insert(1, "-p")
         try:
             out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=1.0).decode().strip()
             if out.isdigit():
+                try:
+                    with open(nid_file, "w") as f:
+                        f.write(out)
+                except OSError:
+                    pass
                 return int(out)
         except Exception:
             pass
@@ -142,9 +166,20 @@ def send_notification(agent_name: str, desktop_id: str, wait: bool = True,
         return None
 
 
-
-def close_notification(nid: Optional[int]) -> None:
+def close_notification(nid: Optional[int] = None, agent_name: Optional[str] = None) -> None:
     """Dismiss an active desktop notification via D-Bus."""
+    if agent_name:
+        nid_file = _nid_path(agent_name)
+        try:
+            if not nid and os.path.exists(nid_file):
+                with open(nid_file, "r") as f:
+                    c = f.read().strip()
+                    if c.isdigit():
+                        nid = int(c)
+            if os.path.exists(nid_file):
+                os.remove(nid_file)
+        except OSError:
+            pass
     if not nid:
         return
     try:
@@ -158,6 +193,7 @@ def close_notification(nid: Optional[int]) -> None:
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=0.5,
         )
     except Exception:
         pass

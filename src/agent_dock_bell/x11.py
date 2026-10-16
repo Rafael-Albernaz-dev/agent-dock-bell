@@ -7,7 +7,7 @@ import re
 import subprocess
 import ctypes
 from ctypes import c_ulong, c_long, c_int, c_void_p, Structure, POINTER
-from typing import Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 class XWMHints(Structure):
     _fields_ = [
@@ -95,9 +95,9 @@ def close_display() -> None:
             pass
         _display = None
 
-def get_ancestor_pids() -> Set[int]:
-    """Traverse /proc/<pid>/status to find all parent process IDs up to init."""
-    pids = []
+def get_ancestor_process_chain() -> List[Tuple[int, str, bytes]]:
+    """Traverse /proc/<pid>/status to find all parent process IDs up to init with comm and cmdline."""
+    chain = []
     curr = os.getpid()
     while curr > 1:
         try:
@@ -111,10 +111,31 @@ def get_ancestor_pids() -> Set[int]:
                 break
             curr = parent
             if curr > 1:
-                pids.append(curr)
+                comm = ""
+                comm_path = f"/proc/{curr}/comm"
+                if os.path.exists(comm_path):
+                    try:
+                        with open(comm_path, "r", errors="ignore") as f:
+                            comm = f.read().strip().lower()
+                    except Exception:
+                        pass
+                cmdline = b""
+                cmdline_path = f"/proc/{curr}/cmdline"
+                if os.path.exists(cmdline_path):
+                    try:
+                        with open(cmdline_path, "rb") as f:
+                            cmdline = f.read().lower()
+                    except Exception:
+                        pass
+                chain.append((curr, comm, cmdline))
         except Exception:
             break
-    return set(pids)
+    return chain
+
+def get_ancestor_pids() -> Set[int]:
+    """Traverse /proc/<pid>/status to find all parent process IDs up to init."""
+    chain = get_ancestor_process_chain()
+    return {pid for pid, _, _ in chain}
 
 def get_active_window_id() -> Optional[str]:
     """Query X11 root window for the currently active window hex ID."""
@@ -298,11 +319,37 @@ def is_terminal_active_atspi(term_pids: Set[int], term_ttys: Optional[Set[str]] 
                 if not frames:
                     continue
 
-                any_frame_active = any(
-                    w.get_state_set().contains(Atspi.StateType.ACTIVE)
-                    or w.get_state_set().contains(Atspi.StateType.FOCUSED)
-                    for w in frames
-                )
+                def has_focused_descendant(node, depth: int = 0, max_depth: int = 8) -> bool:
+                    if depth > max_depth or not node:
+                        return False
+                    try:
+                        st = node.get_state_set()
+                        if st and hasattr(st, "contains") and st.contains(Atspi.StateType.FOCUSED):
+                            return True
+                        if hasattr(node, "get_child_count") and hasattr(node, "get_child_at_index"):
+                            count = node.get_child_count()
+                            for k in range(count):
+                                ch = node.get_child_at_index(k)
+                                if ch and has_focused_descendant(ch, depth + 1, max_depth):
+                                    return True
+                    except Exception:
+                        pass
+                    return False
+
+                def is_frame_active(frame) -> bool:
+                    try:
+                        st = frame.get_state_set()
+                        if st and hasattr(st, "contains"):
+                            if (
+                                st.contains(Atspi.StateType.ACTIVE)
+                                or st.contains(Atspi.StateType.FOCUSED)
+                            ):
+                                return True
+                        return has_focused_descendant(frame)
+                    except Exception:
+                        return False
+
+                any_frame_active = any(is_frame_active(w) for w in frames)
                 if not any_frame_active:
                     continue
 
@@ -324,10 +371,7 @@ def is_terminal_active_atspi(term_pids: Set[int], term_ttys: Optional[Set[str]] 
                             if res:
                                 matched_any = True
                                 frame, tab = res
-                                f_active = (
-                                    frame.get_state_set().contains(Atspi.StateType.ACTIVE)
-                                    or frame.get_state_set().contains(Atspi.StateType.FOCUSED)
-                                )
+                                f_active = is_frame_active(frame)
                                 t_selected = (
                                     tab.get_state_set().contains(Atspi.StateType.SELECTED)
                                     if tab is not frame else True
@@ -340,34 +384,29 @@ def is_terminal_active_atspi(term_pids: Set[int], term_ttys: Optional[Set[str]] 
                         pass
 
                 # Fallback when no TTY matched:
+                def tree_has_terminal_widget(node, depth=0):
+                    if depth > 8:
+                        return False
+                    try:
+                        if node.get_role() == Atspi.Role.TERMINAL:
+                            return True
+                        if hasattr(node, "get_child_count") and hasattr(node, "get_child_at_index"):
+                            for k in range(node.get_child_count()):
+                                ch = node.get_child_at_index(k)
+                                if ch and tree_has_terminal_widget(ch, depth + 1):
+                                    return True
+                    except Exception:
+                        pass
+                    return False
+
+                app_has_terminals = any(tree_has_terminal_widget(w) for w in frames)
+
                 for win in frames:
-                    state_set = win.get_state_set()
-                    if (
-                        state_set.contains(Atspi.StateType.ACTIVE)
-                        or state_set.contains(Atspi.StateType.FOCUSED)
-                    ):
-                        if len(frames) == 1:
+                    if is_frame_active(win):
+                        if len(frames) == 1 or not app_has_terminals:
                             return True
 
-                        # In multi-window apps without TTY matching, check if any terminal widget has FOCUSED
-                        def has_focused_terminal(node, depth=0):
-                            if depth > 8:
-                                return False
-                            try:
-                                if (
-                                    node.get_role() == Atspi.Role.TERMINAL
-                                    and node.get_state_set().contains(Atspi.StateType.FOCUSED)
-                                ):
-                                    return True
-                                for k in range(node.get_child_count()):
-                                    ch = node.get_child_at_index(k)
-                                    if ch and has_focused_terminal(ch, depth + 1):
-                                        return True
-                            except Exception:
-                                pass
-                            return False
-
-                        if has_focused_terminal(win):
+                        if has_focused_descendant(win):
                             return True
             except Exception:
                 continue

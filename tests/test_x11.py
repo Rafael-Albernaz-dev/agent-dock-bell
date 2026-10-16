@@ -45,6 +45,49 @@ def test_get_ancestor_pids():
     # PID 1 is not a terminal and must not enter focus/liveness filters.
     assert 1 not in ancestors
 
+def test_get_ancestor_process_chain():
+    from unittest.mock import patch, mock_open
+    from agent_dock_bell.x11 import get_ancestor_process_chain
+
+    # Real process tree: test running -> bash/runner -> init
+    chain = get_ancestor_process_chain()
+    assert isinstance(chain, list)
+    for item in chain:
+        assert len(item) == 3
+        pid, comm, cmdline = item
+        assert isinstance(pid, int)
+        assert pid > 1
+        assert isinstance(comm, str)
+        assert isinstance(cmdline, bytes)
+
+    # Simulated multi-level process tree: curr=300 -> ppid=200 (codex) -> ppid=100 (hermes) -> ppid=1 (init)
+    def fake_open(path, *args, **kwargs):
+        p = str(path)
+        if "/proc/300/status" in p:
+            return mock_open(read_data="Name:\tbell\nPPid:\t200\n")()
+        elif "/proc/200/status" in p:
+            return mock_open(read_data="Name:\tcodex\nPPid:\t100\n")()
+        elif "/proc/200/comm" in p:
+            return mock_open(read_data="codex\n")()
+        elif "/proc/200/cmdline" in p:
+            return mock_open(read_data=b"/home/toru/.local/bin/codex\0exec\0")()
+        elif "/proc/100/status" in p:
+            return mock_open(read_data="Name:\thermes\nPPid:\t1\n")()
+        elif "/proc/100/comm" in p:
+            return mock_open(read_data="hermes\n")()
+        elif "/proc/100/cmdline" in p:
+            return mock_open(read_data=b"/home/toru/.hermes/hermes-agent/venv/bin/python\0/home/toru/.hermes/hermes-agent/hermes\0")()
+        return mock_open(read_data="")()
+
+    with patch("os.getpid", return_value=300), \
+         patch("os.path.exists", return_value=True), \
+         patch("builtins.open", side_effect=fake_open):
+        sim_chain = get_ancestor_process_chain()
+        assert len(sim_chain) == 2
+        assert sim_chain[0] == (200, "codex", b"/home/toru/.local/bin/codex\0exec\0")
+        assert sim_chain[1] == (100, "hermes", b"/home/toru/.hermes/hermes-agent/venv/bin/python\0/home/toru/.hermes/hermes-agent/hermes\0")
+
+
 def test_detect_terminal_process():
     from unittest.mock import patch, mock_open
     from agent_dock_bell.x11 import detect_terminal_process
@@ -283,6 +326,71 @@ def test_atspi_electron_active_frame_detected_as_focused():
     with patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}):
         assert is_terminal_active_atspi({933148}) is True
 
+def test_atspi_electron_multi_frame_active_detected_as_focused():
+    """Verify that multi-frame Electron/ChatGPT app (4 frames, no terminal widgets) is detected as active when one frame has ACTIVE state."""
+    from agent_dock_bell.x11 import is_terminal_active_atspi
+
+    role = types.SimpleNamespace(FRAME=1, WINDOW=2, DIALOG=3, PANEL=4)
+    state = types.SimpleNamespace(ACTIVE=1, FOCUSED=2)
+
+    class Window:
+        def __init__(self, window_role, states):
+            self.window_role = window_role
+            self.states = states
+
+        def get_role(self):
+            return self.window_role
+
+        def get_state_set(self):
+            return self
+
+        def contains(self, value):
+            return value in self.states
+
+        def get_child_count(self):
+            return 0
+
+        def get_child_at_index(self, index):
+            return None
+
+    class App:
+        def __init__(self, pid, children):
+            self.pid = pid
+            self.children = children
+
+        def get_process_id(self):
+            return self.pid
+
+        def get_name(self):
+            return "ChatGPT"
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    # Real-world ChatGPT has 4 frames, frame 1 is ACTIVE (no Role.TERMINAL in tree)
+    chatgpt = App(933148, [
+        Window(role.FRAME, set()),
+        Window(role.FRAME, {state.ACTIVE}),
+        Window(role.FRAME, set()),
+        Window(role.FRAME, set()),
+    ])
+    desktop = types.SimpleNamespace(
+        get_child_count=lambda: 1,
+        get_child_at_index=lambda index: [chatgpt][index],
+    )
+    atspi = types.SimpleNamespace(Role=role, StateType=state, init=lambda: None,
+                                  get_desktop=lambda index: desktop)
+    gi = types.ModuleType("gi")
+    gi.require_version = lambda *args: None
+    repository = types.ModuleType("gi.repository")
+    repository.Atspi = atspi
+    with patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}):
+        assert is_terminal_active_atspi({933148}) is True
+
+
 def test_x11_window_discovery_on_wayland_with_display():
     """Verify XWayland windows are discovered under Wayland when DISPLAY is available."""
     from agent_dock_bell.x11 import find_terminal_windows
@@ -447,4 +555,74 @@ def test_atspi_multi_tab_same_window_checks_tab_selected():
         # Once tab0 is SELECTED -> True
         tab0.states.add(state.SELECTED)
         assert is_terminal_active_atspi({10204}, term_ttys={"/dev/pts/1"}) is True
+
+def test_atspi_wayland_frame_without_active_state_uses_child_focus():
+    """Verify that on Wayland where top-level frames report neither ACTIVE nor FOCUSED,
+    a focused descendant terminal widget correctly marks the terminal as active."""
+    from agent_dock_bell.x11 import is_terminal_active_atspi
+
+    role = types.SimpleNamespace(FRAME=1, WINDOW=2, DIALOG=3, TERMINAL=4)
+    state = types.SimpleNamespace(ACTIVE=1, FOCUSED=2, SHOWING=3)
+
+    class Node:
+        def __init__(self, node_role, states, children=None):
+            self.node_role = node_role
+            self.states = set(states)
+            self.children = children or []
+
+        def get_role(self):
+            return self.node_role
+
+        def get_state_set(self):
+            return self
+
+        def contains(self, value):
+            return value in self.states
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    class App:
+        def __init__(self, pid, children):
+            self.pid = pid
+            self.children = children
+
+        def get_process_id(self):
+            return self.pid
+
+        def get_name(self):
+            return "gnome-terminal-server"
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    # Top frame only has SHOWING (no ACTIVE, no FOCUSED, typical Wayland GNOME Terminal behavior)
+    child_terminal = Node(role.TERMINAL, {state.FOCUSED})
+    win = Node(role.FRAME, {state.SHOWING}, children=[child_terminal])
+    term_app = App(10204, [win])
+    desktop = types.SimpleNamespace(
+        get_child_count=lambda: 1,
+        get_child_at_index=lambda idx: term_app,
+    )
+    atspi = types.SimpleNamespace(Role=role, StateType=state, init=lambda: None,
+                                  get_desktop=lambda idx: desktop)
+    gi = types.ModuleType("gi")
+    gi.require_version = lambda *args: None
+    repository = types.ModuleType("gi.repository")
+    repository.Atspi = atspi
+
+    with patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}):
+        # Child terminal has FOCUSED -> detected as active!
+        assert is_terminal_active_atspi({10204}) is True
+
+        # When child terminal loses focus -> detected as inactive
+        child_terminal.states.clear()
+        assert is_terminal_active_atspi({10204}) is False
+
 

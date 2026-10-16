@@ -237,6 +237,33 @@ def test_already_active_kills_lingering_daemon():
             assert exc.code == 0
     sound.assert_called_once()
     terminal_bell.assert_not_called()
+    notify.assert_not_called()
+    kill_existing.assert_called_once()
+    spawn.assert_not_called()
+
+def test_already_active_allows_notification_with_opt_in_env():
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "Test Agent"]), \
+         patch.dict(os.environ, {"AGENT_ALARM_NOTIFY_ACTIVE": "1"}), \
+         patch("agent_dock_bell.cli.read_hook_stdin", return_value=("", None)), \
+         patch("agent_dock_bell.x11.get_ancestor_pids", return_value={123}), \
+         patch("agent_dock_bell.x11.find_terminal_windows", return_value=({456}, {123}, "org.gnome.Terminal.desktop")), \
+         patch("agent_dock_bell.x11.get_ancestor_ttys", return_value={"/dev/pts/7"}), \
+         patch("agent_dock_bell.x11.get_active_window_id", return_value="0x1c8"), \
+         patch("agent_dock_bell.x11.is_terminal_focused", return_value=True), \
+         patch("agent_dock_bell.audio.resolve_sound_file", return_value="bell"), \
+         patch("agent_dock_bell.audio.play_single_sound") as sound, \
+         patch("agent_dock_bell.dock.send_terminal_bell") as terminal_bell, \
+         patch("agent_dock_bell.dock.send_notification") as notify, \
+         patch("agent_dock_bell.daemon.PIDLock.kill_existing") as kill_existing, \
+         patch("subprocess.Popen") as spawn:
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    sound.assert_called_once()
+    terminal_bell.assert_not_called()
     assert notify.call_args.kwargs["term_ttys"] == {"/dev/pts/7"}
     kill_existing.assert_called_once()
     spawn.assert_not_called()
@@ -262,4 +289,168 @@ def test_cli_passes_ancestor_ttys_to_is_terminal_focused():
     mock_ttys.assert_called_with({123})
     # is_terminal_focused must be called with term_ttys
     assert mock_focused.call_args.kwargs["term_ttys"] == {"/dev/pts/3"}
+
+def test_should_skip_chatgpt_ui_by_arg():
+    from agent_dock_bell.cli import should_skip_event
+
+    assert should_skip_event("", None, ["ChatGPT UI"]) is True
+    assert should_skip_event("", None, ["ChatGPT"]) is True
+    assert should_skip_event("", None, ["chatgpt"]) is True
+    assert should_skip_event("", None, ["--force", "ChatGPT UI"]) is False
+
+def test_should_skip_chatgpt_ui_by_env():
+    from agent_dock_bell.cli import should_skip_event
+
+    for key, val in [
+        ("CHROME_DESKTOP", "chatgpt.desktop"),
+        ("GIO_LAUNCHED_DESKTOP_FILE", "/home/toru/.local/share/applications/chatgpt.desktop"),
+        ("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop"),
+        ("CODEX_CLI_PATH", "/usr/lib/chatgpt/resources/codex"),
+        ("CODEX_APP_TOOLS_PIPE_PATH", "/tmp/codex-pipe.sock"),
+        ("CHATGPT_DESKTOP", "1"),
+        ("BROWSER_USE_CODEX_APP_VERSION", "26.1007.21434"),
+    ]:
+        with patch.dict(os.environ, {key: val}):
+            assert should_skip_event("", None, ["Codex CLI"]) is True
+
+def test_should_skip_chatgpt_ui_by_ancestor_process():
+    from agent_dock_bell.cli import should_skip_event
+
+    def mock_file_open(path, *args, **kwargs):
+        from unittest.mock import mock_open
+        if "/proc/789/comm" in str(path):
+            return mock_open(read_data="ChatGPT\n")()
+        elif "/proc/789/cmdline" in str(path):
+            return mock_open(read_data=b"/usr/lib/chatgpt/ChatGPT\0--ozone-platform=wayland\0")()
+        return mock_open(read_data="")()
+
+    with patch("agent_dock_bell.x11.get_ancestor_pids", return_value={789}), \
+         patch("os.path.exists", return_value=True), \
+         patch("builtins.open", side_effect=mock_file_open):
+        assert should_skip_event("", None, ["Codex CLI"]) is True
+
+def test_chatgpt_cli_main_exits_cleanly_without_audio():
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "ChatGPT UI"]), \
+         patch("agent_dock_bell.cli.read_hook_stdin", return_value=("", None)), \
+         patch("agent_dock_bell.audio.play_single_sound") as mock_sound, \
+         patch("agent_dock_bell.dock.send_notification") as mock_notify, \
+         patch("subprocess.Popen") as mock_popen:
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    mock_sound.assert_not_called()
+    mock_notify.assert_not_called()
+    mock_popen.assert_not_called()
+
+def test_daemon_mode_chatgpt_exits_immediately():
+    from agent_dock_bell.cli import main
+
+    with patch.object(sys, "argv", ["agent-dock-bell", "--daemon", "AI Agent", "chatgpt.desktop"]), \
+         patch("agent_dock_bell.daemon.run_daemon") as mock_run:
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+    mock_run.assert_not_called()
+
+
+def test_is_nested_agent_execution_env_markers():
+    from agent_dock_bell.cli import is_nested_agent_execution
+
+    with patch.dict(os.environ, {"HERMES_DELEGATED_CHILD_CONTEXT": "1"}):
+        assert is_nested_agent_execution(["Codex CLI"]) is True
+
+    with patch.dict(os.environ, {"CODEX_APP_TOOLS_PIPE_PATH": "/tmp/pipe"}):
+        assert is_nested_agent_execution(["Codex CLI"]) is True
+
+    with patch.dict(os.environ, {"ANTIGRAVITY_SUBAGENT": "1"}):
+        assert is_nested_agent_execution(["Antigravity CLI"]) is True
+
+
+def test_is_nested_agent_execution_payload_markers():
+    from agent_dock_bell.cli import is_nested_agent_execution
+
+    # Tool calls inside prompt turn
+    assert is_nested_agent_execution(["Hermes"], {"tool_name": "terminal"}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"tool_name": "execute_code"}}) is True
+
+    # Background tasks and subagents
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"task_id": "bg-review-1"}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"task_id": "subagent-0-abc"}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"task_id": "cron-daily"}) is True
+
+    # Failed or interrupted turns
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"failed": True}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"interrupted": True}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"completed": False}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"failed": True}) is True
+
+    # Abnormal turn exit reasons
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"turn_exit_reason": "guardrail_halt"}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"turn_exit_reason": "session_persistence_failed"}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"turn_exit_reason": "budget_exhausted"}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"turn_exit_reason": "interrupted_by_user"}}) is True
+    assert is_nested_agent_execution(["Hermes"], {"extra": {"turn_exit_reason": "max_iterations_reached(10/10)"}}) is True
+
+    # Normal prompt text completion is NOT nested
+    with patch("agent_dock_bell.x11.get_ancestor_process_chain", return_value=[]):
+        assert is_nested_agent_execution(
+            ["Hermes"],
+            {"extra": {"turn_exit_reason": "text_response(finish_reason=stop)", "completed": True, "failed": False, "interrupted": False}},
+        ) is False
+
+
+def test_is_nested_agent_execution_process_ancestry():
+    from agent_dock_bell.cli import is_nested_agent_execution
+
+    # 1. Hermes spawning Codex CLI as a tool
+    hermes_spawning_codex = [
+        (595387, "codex", b"/home/toru/.local/bin/codex\0exec\0"),
+        (133459, "hermes", b"/home/toru/.hermes/hermes-agent/venv/bin/python\0/home/toru/.hermes/hermes-agent/hermes\0"),
+    ]
+    with patch("agent_dock_bell.x11.get_ancestor_process_chain", return_value=hermes_spawning_codex):
+        assert is_nested_agent_execution(["Codex CLI"]) is True
+
+    # 2. Antigravity spawning Codex CLI
+    antigravity_spawning_codex = [
+        (5000, "codex", b"/home/toru/.local/bin/codex\0exec\0"),
+        (4000, "antigravity", b"/home/toru/.local/bin/antigravity\0"),
+    ]
+    with patch("agent_dock_bell.x11.get_ancestor_process_chain", return_value=antigravity_spawning_codex):
+        assert is_nested_agent_execution(["Codex CLI"]) is True
+
+    # 3. Hermes parent spawning Hermes subagent child process
+    nested_hermes_subagents = [
+        (140000, "hermes", b"python\0/home/toru/.hermes/hermes-agent/hermes\0"),
+        (133459, "hermes", b"python\0/home/toru/.hermes/hermes-agent/hermes\0"),
+    ]
+    with patch("agent_dock_bell.x11.get_ancestor_process_chain", return_value=nested_hermes_subagents):
+        assert is_nested_agent_execution(["Hermes"]) is True
+
+    # 4. Standalone Codex (only codex in hierarchy)
+    standalone_codex = [
+        (595387, "codex", b"/home/toru/.local/bin/codex\0"),
+    ]
+    with patch("agent_dock_bell.x11.get_ancestor_process_chain", return_value=standalone_codex):
+        assert is_nested_agent_execution(["Codex CLI"]) is False
+
+    # 5. Standalone Hermes (only hermes in hierarchy)
+    standalone_hermes = [
+        (133459, "hermes", b"/home/toru/.hermes/hermes-agent/venv/bin/python\0/home/toru/.hermes/hermes-agent/hermes\0"),
+    ]
+    with patch("agent_dock_bell.x11.get_ancestor_process_chain", return_value=standalone_hermes):
+        assert is_nested_agent_execution(["Hermes"]) is False
+
+    # 6. Alarm wrapper scripts are ignored and do not count as outer agents
+    with_alarm_wrappers = [
+        (595390, "bash", b"/bin/bash\0/home/toru/.local/bin/codex-cli-alarm.sh\0Codex CLI\0"),
+        (595387, "codex", b"/home/toru/.local/bin/codex\0"),
+    ]
+    with patch("agent_dock_bell.x11.get_ancestor_process_chain", return_value=with_alarm_wrappers):
+        assert is_nested_agent_execution(["Codex CLI"]) is False
+
+
 

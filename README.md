@@ -12,8 +12,8 @@ When long-running agent reasoning or multi-step tool executions finish, `agent-d
 1. 🎵 Plays a subtle, non-intrusive audio chime on a gentle loop.
 2. 📌 Sets an unread badge (`"1"`) and urgency hint on your Ubuntu / GNOME Dock icon.
 3. 💃 Triggers the native dock icon dance/wiggle animation.
-4. 🔔 Displays a native desktop notification with agent name and status. On GNOME Terminal, clicking it focuses the terminal.
-5. ⚡ Stops the alarm instantly when the target terminal/app regains focus or detectable TTY input occurs.
+4. 🔔 When away from the terminal, displays a native desktop notification with agent name and status (clicking it refocuses the terminal). When you are already looking at the terminal, visual popups are automatically suppressed to eliminate notification spam.
+5. ⚡ Stops the alarm instantly when the target terminal/app regains focus, is clicked, or receives keyboard interaction.
 
 No modal confirmation dialogs. No dismiss buttons. Pure keyboard and focus flow.
 
@@ -66,6 +66,9 @@ flowchart TD
 ```
 
 ### Engineering Highlights
+* **Zero Visual Notification Spam**: When the terminal is already focused and active, visual notification popups are automatically suppressed so conversational chat turns (like Hermes or Codex prompt loops) never interrupt your typing.
+* **In-Place Notification Replacement & Debouncing**: Uses `replaces_id` on D-Bus and `-r` with `x-canonical-private-synchronous` in `notify-send`, ensuring that multiple notifications update the existing banner in place without stacking multiple popups on the screen or flooding GNOME Shell.
+* **Intelligent Agent Hook & Tool-Use Filter**: Bounded stdin parser inspects hook payloads from Hermes, Codex, and Antigravity, discarding intermediate tool executions, background subagents, and incomplete sessions (`tool_use`, `child_role: subagent`, `completed: false`) to avoid false alarms during multi-turn executions.
 * **Detached Hook Return**: Returns `{}` immediately after starting the detached daemon. Skipped intermediate events exit in ~40 ms, avoiding agent execution timeouts.
 * **Hybrid Wayland & X11 Focus Detection**: Combines event-driven AT-SPI (`gi.repository.Atspi`) with `GLib.MainLoop` and X11/XWayland active window tracking (`_NET_ACTIVE_WINDOW`), ensuring reliable detection across both native Wayland and XWayland environments.
 * **Per-Window & Per-Tab TTY Focus Precision**: In multi-window and multi-tab terminals managed by a single server process (such as `gnome-terminal-server`), maps the caller's exact slave PTS (`/dev/pts/N`) to its specific AT-SPI frame and tab (`ACTIVE` + `SELECTED`), with an in-memory `(pid, tty)` cache and inactive-window short-circuit (~2–13 ms) so background tabs/windows still trigger alarms when you are typing in another terminal window.
@@ -117,7 +120,7 @@ agent-dock-bell/
 ### Running Test Suite & Quality Gates
 
 ```bash
-# Run full test suite (73 tests: Unit + Regression + Integration):
+# Run full test suite (99 tests: Unit + Regression + Integration):
 ./scripts/run-tests.sh
 
 # Run strict 5-tier Quality Gate verification:
@@ -221,6 +224,9 @@ export AGENT_ALARM_VOLUME="1.0"
 
 # Maximum audio loop duration before automatic silence (in seconds, default 180)
 export AGENT_ALARM_MAX_AUDIO="180"
+
+# Visual notification behavior when already focused in terminal (default 0 = suppressed to avoid spam; 1 = always show)
+export AGENT_ALARM_NOTIFY_ACTIVE="0"
 ```
 
 ---
