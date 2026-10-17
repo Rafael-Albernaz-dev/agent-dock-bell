@@ -85,8 +85,8 @@ func runDiagnosticsMode() int {
 	sock := daemon.DefaultSocketPath()
 	resp, err := daemon.SendRequest(sock, daemon.Request{Action: "status"}, 500*time.Millisecond)
 	if err == nil && resp.OK {
-		fmt.Printf("Daemon socket: %s (running, focus_bridge=%v, active_alarm=%v)\n",
-			sock, resp.FocusBridgeAvailable, resp.ActiveAlarm)
+		fmt.Printf("Daemon socket: %s (running, idle_monitor=%v, focus_bridge=%v, active_alarm=%v)\n",
+			sock, resp.IdleMonitorAvailable, resp.FocusBridgeAvailable, resp.ActiveAlarm)
 	} else {
 		fmt.Printf("Daemon socket: %s (standby / on-demand)\n", sock)
 	}

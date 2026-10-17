@@ -27,9 +27,17 @@ const (
 	FocusBridgePath    = dbus.ObjectPath("/org/agentdockbell/FocusBridge")
 	FocusBridgeIface   = "org.agentdockbell.FocusBridge"
 
+	IdleMonitorBusName = "org.gnome.Mutter.IdleMonitor"
+	IdleMonitorPath    = dbus.ObjectPath("/org/gnome/Mutter/IdleMonitor/Core")
+	IdleMonitorIface   = "org.gnome.Mutter.IdleMonitor"
+
 	NotificationsBusName = "org.freedesktop.Notifications"
 	NotificationsPath    = dbus.ObjectPath("/org/freedesktop/Notifications")
 	NotificationsIface   = "org.freedesktop.Notifications"
+
+	// ActiveUserThresholdMs defines the idle threshold (2000 ms) below which the user
+	// is considered actively using the screen right now (plays 1 chime + notification, no annoying loop).
+	ActiveUserThresholdMs = 2000
 )
 
 // Request is sent by the CLI hook client to the daemon over the Unix socket.
@@ -48,6 +56,7 @@ type Response struct {
 	OK                   bool   `json:"ok"`
 	Status               string `json:"status"`
 	FocusBridgeAvailable bool   `json:"focus_bridge_available,omitempty"`
+	IdleMonitorAvailable bool   `json:"idle_monitor_available,omitempty"`
 	ActiveAlarm          bool   `json:"active_alarm,omitempty"`
 	SoundFile            string `json:"sound_file,omitempty"`
 	Error                string `json:"error,omitempty"`
@@ -84,7 +93,9 @@ type activeAlarm struct {
 	ttyPath      string
 	initialAtime time.Time
 	hasAtime     bool
+	startedAt    time.Time
 	notifyID     uint32
+	idleWatchID  uint32
 	done         chan struct{}
 }
 
@@ -221,10 +232,12 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		active := s.current != nil
 		s.mu.Unlock()
 		_, fbOK := s.getFocusedWindowPID()
+		_, imOK := s.getUserIdleTimeMs()
 		return Response{
 			OK:                   true,
 			Status:               "running",
 			FocusBridgeAvailable: fbOK,
+			IdleMonitorAvailable: imOK,
 			ActiveAlarm:          active,
 			SoundFile:            s.cfg.SoundFile,
 		}
@@ -255,7 +268,28 @@ func (s *Server) handleTrigger(ctx context.Context, req Request) Response {
 		}
 	}
 
-	// 2. User is away from the terminal: replace any existing alarm, send notification, and start loop
+	// 2. Check if the user is actively interacting with the screen right now (mouse/keyboard idle < 2s).
+	// When the user is already watching and moving the mouse/typing in another window, show the
+	// notification banner and play ONE chime without repeating an annoying audio loop.
+	if !req.Force {
+		if idleMs, ok := s.getUserIdleTimeMs(); ok && idleMs < ActiveUserThresholdMs {
+			s.stopCurrentAlarm("user-already-active")
+			s.mu.Lock()
+			replacesID := s.lastNIDs[agent]
+			s.mu.Unlock()
+			nid := s.sendNotification(agent, req.DesktopID, replacesID)
+			if nid > 0 {
+				s.mu.Lock()
+				s.lastNIDs[agent] = nid
+				s.mu.Unlock()
+			}
+			audio.PlayOnce(s.cfg.PlayerBin, s.cfg.SoundFile, s.cfg.Volume)
+			s.logger.Info("alarm_single_chime_user_active", "agent", agent, "idle_ms", idleMs)
+			return Response{OK: true, Status: "single-chime-user-active"}
+		}
+	}
+
+	// 3. User is away / idle: replace any existing alarm, send notification, register active watch, and start loop
 	s.stopCurrentAlarm("replaced-by-new-trigger")
 
 	s.mu.Lock()
@@ -263,8 +297,8 @@ func (s *Server) handleTrigger(ctx context.Context, req Request) Response {
 	s.mu.Unlock()
 
 	nid := s.sendNotification(agent, req.DesktopID, replacesID)
-
 	initialAtime, hasAtime := procinfo.ReadAccessTime(req.TTYPath)
+	watchID := s.addUserActiveWatch()
 
 	alarmCtx, cancel := context.WithCancel(ctx)
 	alarm := &activeAlarm{
@@ -275,7 +309,9 @@ func (s *Server) handleTrigger(ctx context.Context, req Request) Response {
 		ttyPath:      req.TTYPath,
 		initialAtime: initialAtime,
 		hasAtime:     hasAtime,
+		startedAt:    time.Now(),
 		notifyID:     nid,
+		idleWatchID:  watchID,
 		done:         make(chan struct{}),
 	}
 
@@ -291,6 +327,7 @@ func (s *Server) handleTrigger(ctx context.Context, req Request) Response {
 		"terminal_pid", req.TerminalPID,
 		"tty", req.TTYPath,
 		"notification_id", nid,
+		"idle_watch_id", watchID,
 	)
 
 	go s.runAlarmLoop(alarmCtx, alarm)
@@ -301,10 +338,8 @@ func (s *Server) handleTrigger(ctx context.Context, req Request) Response {
 func (s *Server) runAlarmLoop(ctx context.Context, alarm *activeAlarm) {
 	defer close(alarm.done)
 
-	// Start TTY atime & process liveness watcher if a TTY or PID was provided
-	if alarm.ttyPath != "" || alarm.terminalPID > 1 {
-		go s.watchTTYAndProcess(ctx, alarm)
-	}
+	// Start lightweight watcher for TTY input, terminal closure, or user return
+	go s.watchTTYAndProcess(ctx, alarm)
 
 	audio.Loop(ctx, audio.LoopConfig{
 		PlayerBin:   s.cfg.PlayerBin,
@@ -350,6 +385,15 @@ func (s *Server) watchTTYAndProcess(ctx context.Context, alarm *activeAlarm) {
 				alarm.cancel()
 				return
 			}
+			// After the first 800ms of alarm playback, if Mutter IdleMonitor reports the user
+			// just moved the mouse, clicked, or pressed a key (idle < 400ms), stop the alarm immediately.
+			if time.Since(alarm.startedAt) >= 800*time.Millisecond {
+				if idleMs, ok := s.getUserIdleTimeMs(); ok && idleMs < 400 {
+					s.logger.Info("alarm_stopped_user_active_idle_reset", "idle_ms", idleMs)
+					alarm.cancel()
+					return
+				}
+			}
 		}
 	}
 }
@@ -363,6 +407,9 @@ func (s *Server) stopCurrentAlarm(reason string) {
 	if alarm != nil {
 		s.logger.Info("alarm_stopping", "agent", alarm.agentName, "reason", reason)
 		alarm.cancel()
+		if alarm.idleWatchID > 0 {
+			s.removeUserActiveWatch(alarm.idleWatchID)
+		}
 		select {
 		case <-alarm.done:
 		case <-time.After(500 * time.Millisecond):
@@ -374,7 +421,7 @@ func (s *Server) getFocusedWindowPID() (uint32, bool) {
 	if s.bus == nil {
 		return 0, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 
 	obj := s.bus.Object(FocusBridgeBusName, FocusBridgePath)
@@ -385,6 +432,48 @@ func (s *Server) getFocusedWindowPID() (uint32, bool) {
 		return 0, false
 	}
 	return pid, true
+}
+
+func (s *Server) getUserIdleTimeMs() (uint64, bool) {
+	if s.bus == nil {
+		return 0, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	obj := s.bus.Object(IdleMonitorBusName, IdleMonitorPath)
+	var idleMs uint64
+	err := obj.CallWithContext(ctx, IdleMonitorIface+".GetIdletime", 0).Store(&idleMs)
+	if err != nil {
+		return 0, false
+	}
+	return idleMs, true
+}
+
+func (s *Server) addUserActiveWatch() uint32 {
+	if s.bus == nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	obj := s.bus.Object(IdleMonitorBusName, IdleMonitorPath)
+	var watchID uint32
+	if err := obj.CallWithContext(ctx, IdleMonitorIface+".AddUserActiveWatch", 0).Store(&watchID); err != nil {
+		return 0
+	}
+	return watchID
+}
+
+func (s *Server) removeUserActiveWatch(watchID uint32) {
+	if s.bus == nil || watchID == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	obj := s.bus.Object(IdleMonitorBusName, IdleMonitorPath)
+	_ = obj.CallWithContext(ctx, IdleMonitorIface+".RemoveWatch", 0, watchID).Err
 }
 
 func (s *Server) activateWindow(pid int) bool {
@@ -446,6 +535,10 @@ func (s *Server) watchDBusSignals(ctx context.Context) {
 		dbus.WithMatchMember("FocusChanged"),
 	)
 	_ = s.bus.AddMatchSignal(
+		dbus.WithMatchInterface(IdleMonitorIface),
+		dbus.WithMatchMember("WatchFired"),
+	)
+	_ = s.bus.AddMatchSignal(
 		dbus.WithMatchInterface(NotificationsIface),
 		dbus.WithMatchMember("ActionInvoked"),
 	)
@@ -485,6 +578,21 @@ func (s *Server) handleDBusSignal(sig *dbus.Signal) {
 		s.mu.Unlock()
 		if alarm != nil && procinfo.SharesProcessTree(int(focusedPID), alarm.terminalPID, alarm.ancestorPIDs) {
 			s.stopCurrentAlarm("window-focused")
+		}
+
+	case IdleMonitorIface + ".WatchFired":
+		if len(sig.Body) < 1 {
+			return
+		}
+		watchID, ok := toUint32(sig.Body[0])
+		if !ok {
+			return
+		}
+		s.mu.Lock()
+		alarm := s.current
+		s.mu.Unlock()
+		if alarm != nil && (alarm.idleWatchID == 0 || alarm.idleWatchID == watchID) {
+			s.stopCurrentAlarm("user-activity-watch-fired")
 		}
 
 	case NotificationsIface + ".ActionInvoked":

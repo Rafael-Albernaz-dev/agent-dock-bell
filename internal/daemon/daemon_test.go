@@ -18,6 +18,8 @@ import (
 type fakeDBusDesktop struct {
 	mu             sync.Mutex
 	focusedPID     uint32
+	idleTimeMs     uint64
+	lastWatchID    uint32
 	notifyCalls    int
 	lastAgent      string
 	lastReplacesID uint32
@@ -36,6 +38,23 @@ func (f *fakeDBusDesktop) ActivateWindow(pid uint32) (bool, *dbus.Error) {
 	f.activatedPIDs = append(f.activatedPIDs, pid)
 	f.focusedPID = pid
 	return true, nil
+}
+
+func (f *fakeDBusDesktop) GetIdletime() (uint64, *dbus.Error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.idleTimeMs, nil
+}
+
+func (f *fakeDBusDesktop) AddUserActiveWatch() (uint32, *dbus.Error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastWatchID++
+	return f.lastWatchID, nil
+}
+
+func (f *fakeDBusDesktop) RemoveWatch(id uint32) *dbus.Error {
+	return nil
 }
 
 func (f *fakeDBusDesktop) Notify(
@@ -63,13 +82,23 @@ func setupIsolatedDBusServices(t *testing.T, initialFocusedPID uint32) (*dbus.Co
 		t.Skipf("session D-Bus not available: %v", err)
 	}
 
-	desktop := &fakeDBusDesktop{focusedPID: initialFocusedPID}
+	desktop := &fakeDBusDesktop{
+		focusedPID: initialFocusedPID,
+		idleTimeMs: 10000, // default: user idle for 10s (away / distracted)
+	}
 
 	if err := conn.Export(desktop, FocusBridgePath, FocusBridgeIface); err != nil {
 		t.Fatalf("export FocusBridge: %v", err)
 	}
 	if _, err := conn.RequestName(FocusBridgeBusName, dbus.NameFlagReplaceExisting); err != nil {
 		t.Fatalf("request FocusBridge bus name: %v", err)
+	}
+
+	if err := conn.Export(desktop, IdleMonitorPath, IdleMonitorIface); err != nil {
+		t.Fatalf("export IdleMonitor: %v", err)
+	}
+	if _, err := conn.RequestName(IdleMonitorBusName, dbus.NameFlagReplaceExisting); err != nil {
+		t.Fatalf("request IdleMonitor bus name: %v", err)
 	}
 
 	if err := conn.Export(desktop, NotificationsPath, NotificationsIface); err != nil {
@@ -255,6 +284,56 @@ func TestDaemon_EndToEnd_FocusAndNotificationClick(t *testing.T) {
 	}
 	if st.ActiveAlarm {
 		t.Fatalf("expected alarm to stop when GNOME Terminal tab PTY is closed")
+	}
+
+	// 6. Mutter IdleMonitor WatchFired: when alarm is looping and user moves mouse / clicks anywhere,
+	// WatchFired stops the audio loop immediately!
+	resp5, err := SendRequest(sockPath, Request{
+		Action:       "trigger",
+		AgentName:    "Codex CLI",
+		TerminalPID:  termPID,
+		AncestorPIDs: []int{termPID},
+	}, 200*time.Millisecond)
+	if err != nil || resp5.Status != "alarm-started" {
+		t.Fatalf("expected alarm-started, got %+v (err=%v)", resp5, err)
+	}
+
+	desktop.mu.Lock()
+	wID := desktop.lastWatchID
+	desktop.mu.Unlock()
+	if err := busConn.Emit(IdleMonitorPath, IdleMonitorIface+".WatchFired", wID); err != nil {
+		t.Fatalf("Emit WatchFired: %v", err)
+	}
+
+	deadline = time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ = SendRequest(sockPath, Request{Action: "status"}, 100*time.Millisecond)
+		if !st.ActiveAlarm {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st.ActiveAlarm {
+		t.Fatalf("expected alarm to stop immediately on Mutter IdleMonitor WatchFired")
+	}
+
+	// 7. Active user on screen (idleTimeMs < 2000ms): plays 1 chime + notification without starting loop!
+	desktop.mu.Lock()
+	desktop.idleTimeMs = 150 // user moved mouse 150ms ago
+	desktop.mu.Unlock()
+
+	resp6, err := SendRequest(sockPath, Request{
+		Action:       "trigger",
+		AgentName:    "Antigravity",
+		TerminalPID:  termPID,
+		AncestorPIDs: []int{termPID},
+	}, 200*time.Millisecond)
+	if err != nil || resp6.Status != "single-chime-user-active" {
+		t.Fatalf("expected single-chime-user-active when user is actively moving mouse/keyboard, got %+v (err=%v)", resp6, err)
+	}
+	st, _ = SendRequest(sockPath, Request{Action: "status"}, 100*time.Millisecond)
+	if st.ActiveAlarm {
+		t.Fatalf("expected ActiveAlarm=false when user is already active on screen")
 	}
 
 	cancel()

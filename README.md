@@ -9,10 +9,11 @@ An ultra-lightweight, zero-polling desktop alert daemon in **Go + GNOME Shell 46
 
 Built to eliminate multi-project procrastination with **0% idle CPU** and **< 0.5% active OS/terminal overhead**:
 1. **Already looking at the terminal?** Plays a single subtle chime (`1x`) and suppresses visual notification popups.
-2. **Working in another window?**
+2. **Actively using the screen (`idle < 2s` via native Wayland `org.gnome.Mutter.IdleMonitor`)?** Displays the desktop notification banner and plays a **single chime (`1x`)**—never annoying you with a repeating loop while you are actively moving the mouse or typing.
+3. **Away or distracted (`idle >= 2s`)?**
    - Displays a native desktop notification (`org.freedesktop.Notifications`) with click-to-focus.
    - Plays a gentle looped chime (`pw-play` every 3s, capped at 120s).
-   - **Stops immediately** when you click the notification (which raises/activates your terminal window), focus the terminal window (`Alt+Tab` / click), close the terminal tab, or type in the terminal.
+   - **Stops immediately** the moment you move the mouse, click any window/terminal (`Mutter.IdleMonitor.WatchFired`), click/dismiss the notification, close the terminal tab, or type in the terminal.
 
 ---
 
