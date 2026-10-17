@@ -1,101 +1,84 @@
-# Architecture Rules, Quality Gates & Testing Standards
+# Architecture Rules, Guardrails & Quality Gates (`agent-dock-bell` v2)
 
-This document establishes the architecture contracts, quality gates, and anti-gaming testing standards for `agent-dock-bell`. All contributors and autonomous agents modifying this codebase must adhere strictly to these rules.
-
----
-
-## 1. Core Architecture & System Contracts
-
-`agent-dock-bell` bridges AI coding agents (Antigravity CLI, Codex CLI, Hermes, etc.) with the Linux desktop environment (GNOME / Ubuntu on Wayland & X11).
-
-```mermaid
-flowchart TD
-    Hook[Agent Completion Hook] --> CLI[agent_dock_bell.cli]
-    CLI --> Stdin[Inspect Payload: skip subagents & background tasks]
-    CLI --> FocusCheck{Is Terminal Already Focused?}
-    FocusCheck -- Yes --> SingleAlert[Play 1x chime + Notification banner]
-    FocusCheck -- No --> DaemonFork[Fork Detached Alarm Daemon]
-    DaemonFork --> Daemon[agent_dock_bell.daemon]
-    Daemon --> AudioLoop[Loop Audio Worker]
-    Daemon --> DockBadge[Ubuntu Dock LauncherEntry Badge '1' & Urgency]
-    Daemon --> Notification[Desktop Notification Banner]
-    Daemon --> Monitor[AT-SPI & TTY atime Activity Watcher]
-    Monitor -- Focus or Keystroke Detected --> Cleanup[Kill Audio Loop + Clear Badge + Exit 0]
-```
+This document defines the non-negotiable engineering rules, OS/terminal performance guardrails, anti-regression constraints, and mandatory quality gates for `agent-dock-bell`.
 
 ---
 
-## 2. Audio Subsystem Rules
+## 1. Core Scope & Purpose
 
-1. **Self-Contained Bundled Assets**:
-   - The primary notification sound MUST be bundled inside `assets/` in the repository (`assets/universfield-new-notification-02-323592.mp3`).
-   - Code must NEVER assume files exist only in volatile user directories like `~/Downloads` or temporary media mounts.
-2. **Resolution Hierarchy**:
-   `resolve_sound_file()` must resolve candidates in strictly defined priority:
-   1. `AGENT_ALARM_SOUND` environment variable (preset name or valid file path).
-   2. Bundled repository asset (`assets/universfield-new-notification-02-323592.mp3`).
-   3. User local audio directory (`~/.local/share/sounds/universfield-new-notification-02-323592.mp3`).
-   4. Secondary media mount / Downloads fallback.
-   5. System presets (`bell`, `complete`, `pop`, `click`) as last-resort fallback.
-3. **No Dual Bells**:
-   - Do not trigger `\a` (ASCII BEL) on terminals playing custom audio files. Custom PipeWire audio must be clean and unpolluted.
+`agent-dock-bell` is an ultra-lightweight anti-procrastination alert daemon for multi-agent CLI workflows (Google Antigravity CLI, OpenAI Codex CLI, Hermes Agent).
 
----
-
-## 3. Desktop Notification Rules
-
-1. **Global Banner Visibility**:
-   - Desktop notifications sent via `notify-send` MUST display as a prominent top banner on GNOME Shell.
-   - Do NOT pass `string:desktop-entry:...` in `notify-send` hints, as GNOME Shell suppresses banners for running desktop applications when this hint is present.
-   - Always supply `-u normal` (or `-u critical`), `-t 5000`, and `-h boolean:suppress-sound:true` to prevent GNOME from playing its default system chime over the alarm chime.
-2. **Icon Fallback**:
-   - Use `"utilities-terminal"` as a guaranteed fallback icon to ensure clean rendering on systems where application-specific icons are not installed in the icon theme.
-3. **Notification Broker Safety**:
-   - Any background broker socket must cleanly close client sockets in a `finally` block to prevent descriptor leaks.
-   - Never leave pseudo-terminal titles clobbered with UUID markers. Original titles must always be restored.
-   - If broker registration fails or is bypassed (`AGENT_DIRECT_NOTIFICATION=1`), standard `notify-send` must execute immediately without delay.
+When an agent completes a turn:
+1. If the user is **already focused** on that terminal window: play a single subtle chime (`1x`) in the background and show **no** notification banner.
+2. If the user is **focused on another window**:
+   - Display a native desktop notification (`org.freedesktop.Notifications`) with a default click action.
+   - Play a gentle looped chime (`pw-play` every 3 seconds, hard-capped at `120s`).
+   - Stop the looped chime **immediately** when:
+     - The terminal window regains focus (via GNOME Shell `FocusBridge` signal or TTY input activity), **or**
+     - The user clicks the notification (which activates/raises the terminal window and stops the alarm), **or**
+     - The user dismisses the notification or runs `dockbell stop` (`agent-dock-bell --stop`).
 
 ---
 
-## 4. Focus & Activity Detection Rules
-
-1. **TTY Activity Detection**:
-   - Pseudo-terminals (`/dev/pts/*`) update `st_mtime` whenever a process writes to stdout/stderr.
-   - Because agents and shell prompts write output immediately after hook invocation, checking `st_mtime` causes false-positive activity detection and premature alarm termination.
-   - TTY activity monitoring MUST evaluate `st_atime` (access time / read operations = user keystrokes), NEVER `st_mtime` alone.
-2. **Wayland & AT-SPI**:
-   - Window focus detection on Wayland must inspect AT-SPI `Role.FRAME` and `Role.WINDOW` states for `StateType.ACTIVE` and `StateType.FOCUSED`.
-   - Do not assume AT-SPI `grab_focus()` can raise unactivated windows on Wayland; window manager focus stealing is blocked by Mutter/Wayland by design.
-
----
-
-## 5. Anti-Gaming Testing Policy
+## 2. Hard Performance & Safety Guardrails (< 0.5% OS/Terminal Impact)
 
 > [!CAUTION]
-> **No Mock Gaming Allowed.**
-> Mocking away the exact behavior under test is strictly prohibited. All test suites must verify real behavior, real paths, and real contracts.
+> The following patterns caused desktop freezes, terminal input lag, and silent regressions in v1 and are **strictly forbidden** in this repository. Gate 2 of `./scripts/quality-gate.sh` fails the build automatically if any of these appear in source code.
 
-1. **Three-Tier Test Architecture**:
-   - **Unit Tests** (`tests/test_*.py`): Component-level tests verifying internal logic.
-   - **Regression Tests** (`tests/test_regression.py`): Explicit guards against all historical bugs (sound fallback, TTY mtime false triggers, subagent filtering, socket leaks).
-   - **Integration Tests** (`tests/test_integration.py`): Real end-to-end subprocess runs verifying actual CLI behavior (`--test`, `--stop`, `--dry-run`), real file headers, and real binary execution.
-2. **No Broken Imports**:
-   - Tests must not import external libraries at module top-level if they are not declared dependencies or if they break standard test runners.
+1. **FORBIDDEN: AT-SPI (`libatspi`, `gi.repository.Atspi`, `org.a11y.atspi`)**
+   - Never query or subscribe to AT-SPI accessibility trees. Traversing accessibility nodes blocks the main GTK thread of `gnome-terminal-server` and triggers global D-Bus event storms across Chrome/Electron/VS Code.
+2. **FORBIDDEN: Writing to User Pseudo-Terminals (`/dev/pts/*`)**
+   - Never open `/dev/pts/*` with `O_WRONLY` or `O_RDWR`, and never write OSC title markers or BEL characters to a user's terminal.
+   - `/dev/pts/*` may only be inspected via read-only `os.Stat()` (`st_atime`) to detect user keystrokes.
+3. **FORBIDDEN: X11 Polling (`xprop`, `libX11`) & Broad Process Sweeps (`pkill`)**
+   - Never spawn `xprop -spy` or link against `libX11`.
+   - Never run `pkill` or kill processes by command-line substring matching. The daemon owns its child `pw-play` PID directly and terminates only that process.
+4. **FORBIDDEN: Raw Stdin Substring Filtering**
+   - Never inspect raw stdin strings for substrings like `"chatgpt"`, `"synthetic"`, `"test-session"`, or `"claude"`. Conversational text in agent transcripts frequently contains these words.
+   - Hook filtering MUST parse structured JSON fields only, reading full stdin up to `10 MB` (never truncating at `64 KB`).
+5. **Hard Resource & Latency Budgets**
+   - **Hook CLI latency**: `< 25 ms` typical, `50 ms` hard timeout. A hook must never block an AI agent or fail with a non-zero exit code.
+   - **Systemd cgroup limits**: `CPUQuota=1%`, `MemoryMax=25M`, `TasksMax=16`.
+   - **Audio loop cap**: Every alarm loop MUST enforce a `context.WithTimeout` ceiling (default `120s`).
 
 ---
 
-## 6. Mandatory Quality Gates
+## 3. Deterministic Hook Filtering Contract
 
-Before any change is committed or released, all 5 automated Quality Gates must pass:
+The hook parser (`internal/hook`) evaluates only top-level structured JSON fields:
 
-```bash
-./scripts/quality-gate.sh
-```
-
-| Gate | Check | Criteria |
+| Agent / Hook Format | Trigger Condition | Skip Condition (returns `{}` without alerting) |
 |---|---|---|
-| **Gate 1** | Syntax & Compilation | `python3 -m compileall -q src tests` with zero errors. |
-| **Gate 2** | Asset Integrity | Bundled MP3 exists, readable, and size > 10KB. |
-| **Gate 3** | Automated Test Suite | Unit, regression, and integration tests pass cleanly (70/70+). |
-| **Gate 4** | Runtime Diagnostics | `agent-dock-bell --test` outputs `(found)` and `All systems operational`. |
-| **Gate 5** | Lifecycle Shutdown | `agent-dock-bell --stop` terminates alarms and outputs `Stopped active alarms`. |
+| **Antigravity CLI** (`Stop`) | `hook_event_name == "Stop"` (or omitted) and `fullyIdle != false` | `fullyIdle == false`, `is_subagent == true`, `is_background == true`, non-empty `parent_session_id` / `child_role` |
+| **Codex CLI** (`Stop`) | `stop_reason` not in `("tool_use", "intermediate")` | `stop_reason` in `("tool_use", "intermediate")`, `tool_name != ""`, subagent/background task markers |
+| **Hermes Agent** (`on_session_end`) | `completed != false` and `interrupted != true` and `failed != true` (includes `stop`, `end_turn`, `max_tokens`, `text_response(...)`) | `completed == false`, `interrupted == true`, `failed == true`, `HERMES_DELEGATED_CHILD_CONTEXT != ""` |
+
+Every decision (`trigger` or `skip`) is logged with a structured reason by the daemon so silent failures are impossible.
+
+---
+
+## 4. Anti-Gaming Testing Policy
+
+> [!IMPORTANT]
+> **Zero Mock-Gaming.**
+> Unit tests verify pure domain logic (`internal/hook`, `internal/audio`). Integration tests (`internal/daemon`) MUST run against a real isolated `dbus-run-session` bus, a real Unix domain socket, and the compiled `agent-dock-bell` binary.
+
+1. **No Host Desktop Side Effects in Tests**:
+   - Running `./scripts/quality-gate.sh` or `go test ./...` MUST NEVER kill alarms on the developer's active desktop session, emit notifications to the user's real GNOME Shell, or depend on `~/.local/bin/agent-dock-bell` being installed.
+2. **Real Diagnostics (`--test` / `--status`)**:
+   - Diagnostics must verify actual runtime state and never print unconditional success strings when subsystems fail.
+
+---
+
+## 5. Mandatory 6 Quality Gates (`./scripts/quality-gate.sh`)
+
+All 6 gates must pass before any commit or release:
+
+| Gate | Name | Verification |
+|---|---|---|
+| **Gate 1** | Static Analysis & Formatting | `gofmt -s -l .` (zero unformatted files) + `go vet ./...` |
+| **Gate 2** | Forbidden Pattern Guardrail | Fails if source code references `atspi`, `xprop`, `pkill`, `libX11`, or writable `/dev/pts` |
+| **Gate 3** | Bundled Audio & GNOME Extension Integrity | Verifies MP3 header/size in `assets/` and syntax/schema of `gnome-extension/` |
+| **Gate 4** | Unit & Regression Suite (`-race`) | `go test -race` on hook parser (including `>100KB` payloads, `"ChatGPT"`/`"synthetic"` text, `max_tokens`) and audio lifecycle |
+| **Gate 5** | Isolated D-Bus & Socket End-to-End Integration | Runs inside `dbus-run-session`: verifies Hook CLI -> Unix Socket -> Daemon -> D-Bus Notification -> Audio Loop -> `FocusChanged` / `ActionInvoked` -> Window Activation & Instant Stop |
+| **Gate 6** | Hook Performance & Latency Budget | Verifies compiled CLI round-trip execution completes in `< 25 ms` and exits `0` with `{}` output |

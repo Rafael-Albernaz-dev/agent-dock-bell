@@ -1,0 +1,7 @@
+{
+  "uuid": "focus-bridge@agent-dock-bell",
+  "name": "Agent Dock Bell Focus Bridge",
+  "description": "Zero-polling Wayland window focus signal and window activation bridge for agent-dock-bell.",
+  "shell-version": ["45", "46", "47", "48"],
+  "version": 1
+}

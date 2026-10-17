@@ -1,0 +1,19 @@
+[Unit]
+Description=agent-dock-bell Focus-Aware AI Agent Completion Alarm Daemon
+Documentation=https://github.com/Rafael-Albernaz-dev/agent-dock-bell
+After=graphical-session.target dbus.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-dock-bell --daemon
+Restart=on-failure
+RestartSec=2
+
+# Hard OS Performance Guardrails (< 0.5% system impact)
+CPUQuota=5%
+MemoryMax=25M
+TasksMax=16
+Nice=10
+
+[Install]
+WantedBy=default.target

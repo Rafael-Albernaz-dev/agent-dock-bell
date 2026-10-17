@@ -1,64 +1,59 @@
 #!/usr/bin/env bash
+# Installer for agent-dock-bell v2 (Go binary + GNOME Shell 46 FocusBridge + systemd --user)
 set -euo pipefail
 
-TARGET_DIR="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_TARGET="${TARGET_DIR}/agent-dock-bell"
+TARGET_BIN_DIR="${HOME}/.local/bin"
+TARGET_SHARE_DIR="${HOME}/.local/share/agent-dock-bell"
+TARGET_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+TARGET_EXT_DIR="${HOME}/.local/share/gnome-shell/extensions/focus-bridge@agent-dock-bell"
+BIN_TARGET="${TARGET_BIN_DIR}/agent-dock-bell"
 
-echo "=== Installing agent-dock-bell ==="
-mkdir -p "${TARGET_DIR}"
+echo "=== Running Quality Gates before installation ==="
+"${SCRIPT_DIR}/scripts/quality-gate.sh"
 
-# 1. Install runner script pointing to repository src/
-cat << EOF > "${BIN_TARGET}"
-#!/usr/bin/env python3
-import sys
-from pathlib import Path
+echo ""
+echo "=== Installing agent-dock-bell v2 ==="
+mkdir -p "${TARGET_BIN_DIR}" "${TARGET_SHARE_DIR}" "${TARGET_SYSTEMD_DIR}" "${TARGET_EXT_DIR}"
 
-src_dir = Path("${SCRIPT_DIR}/src")
-if src_dir.exists() and str(src_dir) not in sys.path:
-    sys.path.insert(0, str(src_dir))
+# 1. Install bundled audio asset to ~/.local/share/agent-dock-bell/
+cp -f "${SCRIPT_DIR}/assets/universfield-new-notification-02-323592.mp3" "${TARGET_SHARE_DIR}/"
+echo "✓ Installed audio asset to ${TARGET_SHARE_DIR}"
 
-from agent_dock_bell.cli import main
+# 2. Install compiled Go binary atomically
+cp -f "${SCRIPT_DIR}/build/agent-dock-bell" "${BIN_TARGET}.new"
+chmod +x "${BIN_TARGET}.new"
+mv -f "${BIN_TARGET}.new" "${BIN_TARGET}"
+echo "✓ Installed Go binary to ${BIN_TARGET}"
 
-if __name__ == "__main__":
-    main()
-EOF
-chmod +x "${BIN_TARGET}"
-echo "✓ Installed executable runner to ${BIN_TARGET}"
-
-# 2. Maintain compatibility symlink for existing configs (agent-alarm.sh)
-ln -sf "${BIN_TARGET}" "${TARGET_DIR}/agent-alarm.sh"
-echo "✓ Created compatibility symlink: ${TARGET_DIR}/agent-alarm.sh -> agent-dock-bell"
-
-# 3. Create codex helper script
-CODEX_WRAPPER="${TARGET_DIR}/codex-cli-alarm.sh"
-cat << 'EOF' > "${CODEX_WRAPPER}"
+# 3. Create `dockbell` CLI symlink + compatibility wrappers (agent-alarm.sh, codex-cli-alarm.sh)
+ln -sf "${BIN_TARGET}" "${TARGET_BIN_DIR}/dockbell"
+ln -sf "${BIN_TARGET}" "${TARGET_BIN_DIR}/agent-alarm.sh"
+cat << 'EOF' > "${TARGET_BIN_DIR}/codex-cli-alarm.sh"
 #!/usr/bin/env bash
 set -u
 exec "${HOME}/.local/bin/agent-dock-bell" "${1:-Codex CLI}"
 EOF
-chmod +x "${CODEX_WRAPPER}"
-echo "✓ Configured Codex wrapper: ${CODEX_WRAPPER}"
+chmod +x "${TARGET_BIN_DIR}/codex-cli-alarm.sh"
+echo "✓ Installed CLI command 'dockbell' and compatibility wrappers (agent-alarm.sh, codex-cli-alarm.sh)"
 
-# 4. Verify installation
-if "${BIN_TARGET}" --test >/dev/null 2>&1; then
-  echo "✓ Test run passed cleanly."
-else
-  echo "⚠ Warning: Test run returned non-zero exit code."
+# 4. Install GNOME Shell 46 FocusBridge extension
+cp -f "${SCRIPT_DIR}/gnome-extension/focus-bridge@agent-dock-bell/metadata.json" "${TARGET_EXT_DIR}/"
+cp -f "${SCRIPT_DIR}/gnome-extension/focus-bridge@agent-dock-bell/extension.js" "${TARGET_EXT_DIR}/"
+if command -v gnome-extensions >/dev/null 2>&1; then
+    gnome-extensions enable focus-bridge@agent-dock-bell 2>/dev/null || true
 fi
+echo "✓ Installed GNOME Shell extension to ${TARGET_EXT_DIR}"
 
+# 5. Install and start systemd --user service with hard resource guardrails
+cp -f "${SCRIPT_DIR}/systemd/agent-dock-bell.service" "${TARGET_SYSTEMD_DIR}/agent-dock-bell.service"
+systemctl --user daemon-reload
+systemctl --user enable agent-dock-bell.service
+systemctl --user restart agent-dock-bell.service
+sleep 0.2
+echo "✓ Enabled and started systemd user service: agent-dock-bell.service"
+
+# 6. Verify runtime status via `dockbell status`
+"${TARGET_BIN_DIR}/dockbell" status
 echo ""
-echo "=== Integration Guide ==="
-echo "1. Google Antigravity CLI (~/.gemini/config/hooks.json):"
-echo '   { "prompt-alarm": { "Stop": [{ "type": "command", "command": "'"${BIN_TARGET}"'" }] } }'
-echo ""
-echo "2. Codex CLI (~/.codex/hooks.json):"
-echo '   { "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "'"${CODEX_WRAPPER}"' \"Codex CLI\"", "timeout": 600 }] }] } }'
-echo ""
-echo "3. Hermes Agent (~/.hermes/config.yaml):"
-echo '   hooks:'
-echo '     on_session_end:'
-echo '       - command: "'"${BIN_TARGET}"' Hermes"'
-echo '         timeout: 300'
-echo ""
-echo "Installation complete!"
+echo "Installation complete! Use 'dockbell status' or 'dockbell stop' anytime."
